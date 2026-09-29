@@ -1,0 +1,2 @@
+# abap_bapi_zmm_po_split_val
+BAPI MM_PO_SPLIT_VAL
