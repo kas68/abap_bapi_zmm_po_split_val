@@ -12,6 +12,8 @@ CLASS zcl_im_mm_po_split_val DEFINITION
 * Year = year of the PO document date (EKKO-BEDAT), calendar year or
 * fiscal year of the company code (C_USE_FISCAL_YEAR).
 * Only for split-valuated materials with an existing valuation record.
+* New items (e.g. copied from another PO): a filled BWTAR is determined
+* again on the first processing (C_REDETERMINE_NEW_ITEMS).
 * Writes BWTAR only, never MWSKZ / TXJCD - runs side by side with the
 * SAP Tax Service implementation (BAdI is multiple use).
 * Messages: class ZPTP_SPLIT_VAL, 023 and 024.
@@ -60,7 +62,14 @@ CLASS zcl_im_mm_po_split_val DEFINITION
         key   TYPE string,
       END OF ty_msg_sent,
       tt_msg_sent TYPE HASHED TABLE OF ty_msg_sent
-                  WITH UNIQUE KEY id msgno key.
+                  WITH UNIQUE KEY id msgno key,
+
+      BEGIN OF ty_item_state,
+        id     TYPE mepoitem-id,
+        is_new TYPE abap_bool,
+      END OF ty_item_state,
+      tt_item_state TYPE HASHED TABLE OF ty_item_state
+                    WITH UNIQUE KEY id.
 
     "! abap_false = only fill BWTAR when empty (user entry wins)
     "! abap_true  = always overwrite with the table value, except on
@@ -74,7 +83,15 @@ CLASS zcl_im_mm_po_split_val DEFINITION
     "! abap_false = ZPTP_PO_VALTYPE-GJAHR is the calendar year of BEDAT
     "! abap_true  = ZPTP_PO_VALTYPE-GJAHR is the fiscal year of BEDAT
     "!              in the item's company code
-    CONSTANTS c_use_fiscal_year TYPE abap_bool VALUE abap_false.
+    CONSTANTS c_use_fiscal_year TYPE abap_bool VALUE abap_true.
+
+    "! abap_true = on the first processing of a new (unsaved) item, a
+    "!             filled BWTAR is determined again from the table.
+    "!             Covers values copied from a reference PO or item;
+    "!             a value typed or passed by BAPI at that moment is
+    "!             overwritten too.
+    "! abap_false = a filled BWTAR always counts as a user entry
+    CONSTANTS c_redetermine_new_items TYPE abap_bool VALUE abap_true.
 
     "! Buffers - cleared in OPEN, so each PO sees current data
     DATA mt_valtype_buffer TYPE tt_valtype_buffer.
@@ -85,6 +102,10 @@ CLASS zcl_im_mm_po_split_val DEFINITION
     "! Warnings already issued - process_item runs several times per
     "! item, each warning is raised once per item and content
     DATA mt_msg_sent TYPE tt_msg_sent.
+
+    "! Items already processed, with their new-item flag - the first
+    "! processing of a new item triggers the re-determination
+    DATA mt_item_state TYPE tt_item_state.
 
     METHODS get_year
       IMPORTING iv_date         TYPE d
@@ -128,6 +149,18 @@ CLASS zcl_im_mm_po_split_val DEFINITION
                 iv_ebelp         TYPE ebelp
       RETURNING VALUE(rv_exists) TYPE abap_bool.
 
+    "! ev_first_call = first processing of the item in this PO
+    "! ev_new        = item not yet saved (new PO or new item in ME22N)
+    METHODS get_item_state
+      IMPORTING is_item       TYPE mepoitem
+      EXPORTING ev_first_call TYPE abap_bool
+                ev_new        TYPE abap_bool.
+
+    "! Warning 023 for the item's own BWTAR when its valuation record
+    "! is missing - used when a copied value is kept
+    METHODS warn_if_valtype_invalid
+      IMPORTING is_item TYPE mepoitem.
+
     METHODS is_first_warning
       IMPORTING iv_id           TYPE mepoitem-id
                 iv_msgno        TYPE symsgno
@@ -146,7 +179,8 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
            mt_mtart_buffer,
            mt_split_buffer,
            mt_mbew_buffer,
-           mt_msg_sent.
+           mt_msg_sent,
+           mt_item_state.
 
   ENDMETHOD.
 
@@ -166,7 +200,18 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    IF ls_item-bwtar IS NOT INITIAL.
+    " First processing of a new item: a filled BWTAR was copied (reference
+    " PO, item copy) or pre-filled, so it is determined again
+    get_item_state( EXPORTING is_item       = ls_item
+                    IMPORTING ev_first_call = DATA(lv_first_call)
+                              ev_new        = DATA(lv_new_item) ).
+
+    DATA(lv_redetermine) = xsdbool( c_redetermine_new_items = abap_true
+                                    AND lv_first_call = abap_true
+                                    AND lv_new_item = abap_true ).
+
+    IF ls_item-bwtar IS NOT INITIAL
+    AND lv_redetermine = abap_false.
       IF c_override_user_entry = abap_false.
         RETURN.                             " keep user / existing value
       ENDIF.
@@ -202,6 +247,9 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
         mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '024'
                              ls_item-werks lv_mtart lv_gjahr space.
       ENDIF.
+      IF lv_redetermine = abap_true.
+        warn_if_valtype_invalid( ls_item ).   " copied value is kept
+      ENDIF.
       RETURN.
     ENDIF.
 
@@ -229,6 +277,9 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
         " MMMFD (SE11) and enable: mmpur_metafield mmmfd_<valuation_type>.
         mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '023'
                              lv_bwtar ls_item-matnr ls_item-werks space.
+      ENDIF.
+      IF lv_redetermine = abap_true.
+        warn_if_valtype_invalid( ls_item ).   " copied value is kept
       ENDIF.
       RETURN.
     ENDIF.
@@ -401,6 +452,69 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
       WHERE ebeln = @iv_ebeln
         AND ebelp = @iv_ebelp
       INTO @rv_exists.
+
+  ENDMETHOD.
+
+
+  METHOD get_item_state.
+
+    READ TABLE mt_item_state ASSIGNING FIELD-SYMBOL(<ls_state>)
+         WITH TABLE KEY id = is_item-id.
+    IF sy-subrc = 0.
+      ev_first_call = abap_false.
+      ev_new        = <ls_state>-is_new.
+      RETURN.
+    ENDIF.
+
+    ev_first_call = abap_true.
+
+    " New POs have no number yet (initial or $-temporary); new items of
+    " an existing PO (ME22N) are not yet on the database
+    IF is_item-ebeln IS INITIAL
+    OR is_item-ebeln(1) = '$'.
+      ev_new = abap_true.
+    ELSE.
+      SELECT SINGLE @abap_false
+        FROM ekpo
+        WHERE ebeln = @is_item-ebeln
+          AND ebelp = @is_item-ebelp
+        INTO @ev_new.
+      IF sy-subrc <> 0.
+        ev_new = abap_true.
+      ENDIF.
+    ENDIF.
+
+    INSERT VALUE #( id = is_item-id is_new = ev_new )
+           INTO TABLE mt_item_state.
+
+  ENDMETHOD.
+
+
+  METHOD warn_if_valtype_invalid.
+
+    INCLUDE mm_messages_mac.   " mmpur_* message macros
+
+    IF is_item-bwtar IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lv_bwkey) = get_bwkey( is_item-werks ).
+
+    IF is_split_valuated( iv_matnr = is_item-matnr
+                          iv_bwkey = lv_bwkey ) = abap_false
+    OR valtype_exists( iv_matnr = is_item-matnr
+                       iv_bwkey = lv_bwkey
+                       iv_bwtar = is_item-bwtar ) = abap_true.
+      RETURN.
+    ENDIF.
+
+    IF is_first_warning( iv_id    = is_item-id
+                         iv_msgno = '023'
+                         iv_key   = |{ is_item-matnr }/{ is_item-werks }/{ is_item-bwtar }| ) = abap_true.
+      mmpur_business_obj_id is_item-id.
+      mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '023'
+                           is_item-bwtar is_item-matnr is_item-werks space.
+    ENDIF.
 
   ENDMETHOD.
 

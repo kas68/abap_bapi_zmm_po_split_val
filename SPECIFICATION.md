@@ -40,14 +40,16 @@ in a custom table.
 
 | # | Rule |
 |---|---|
-| R1 | The valuation type is proposed only when the item's valuation type is empty. A value entered by the user is kept (default setting). |
+| R1 | The valuation type is proposed only when the item's valuation type is empty. A value entered by the user is kept (default setting). Exception: R9. |
 | R2 | Optional (setting): the table value overwrites a user-entered value, but never on items with PO history (goods receipt, invoice, …) or marked delivery completed. |
-| R3 | The year is the year of the PO document date. Calendar year by default; optionally the fiscal year of the company code. |
+| R3 | The year is the year of the PO document date. Fiscal year of the company code by default; optionally the calendar year. |
 | R4 | Lookup order: first plant + material type + year; if not found, plant + empty material type + year (plant default). |
 | R5 | No table entry: the field stays empty. Optionally a warning is shown. |
 | R6 | The material must be split-valuated in the plant's valuation area; otherwise nothing happens. |
 | R7 | The valuation type must exist for the material in the valuation area (not flagged for deletion); otherwise a warning is shown and the field stays empty. |
 | R8 | Each warning is shown once per item and content. |
+| R9 | New items (PO not yet saved, or new item added in ME22N): on the first processing, a filled valuation type is determined again from the table (setting, on by default). This covers values copied from a reference PO or another item. A value typed by the user before the first Enter, or passed through a BAPI, is overwritten too; a later change by the user is kept. No message is shown when the value is replaced. |
+| R10 | If R9 cannot determine a value (no table entry, or the table value has no valuation record) the copied value is kept; if its own valuation record is missing or flagged for deletion, warning 023 is shown. |
 
 ## 1.4 Maintenance of determination data
 
@@ -69,7 +71,7 @@ Message class `ZPTP_SPLIT_VAL`, type **W** (warning – the PO can still be save
 
 | No. | Text | When |
 |---|---|---|
-| 023 | Valuation type &1 not defined for material &2 in plant &3 | R7 – valuation record missing |
+| 023 | Valuation type &1 not defined for material &2 in plant &3 | R7 – valuation record missing; R10 – copied value kept without valuation record |
 | 024 | No valuation type maintained in ZPTP_PO_VALTYPE for &1 / &2 / &3 | R5 – no table entry (only if activated) |
 
 ## 1.6 Settings
@@ -78,7 +80,8 @@ Message class `ZPTP_SPLIT_VAL`, type **W** (warning – the PO can still be save
 |---|---|---|
 | Override user entry | Off | On = rule R2 applies |
 | Warn if no table entry | Off | On = message 024 is shown |
-| Use fiscal year | Off | On = the table holds fiscal years of the company code |
+| Use fiscal year | On | On = the table holds fiscal years of the company code; Off = calendar years |
+| Determine again on new items | On | On = rule R9 applies; Off = a copied value counts as a user entry |
 
 Settings are constants in the class (see 2.4); a change requires a transport.
 
@@ -132,6 +135,7 @@ group `ZPTP_PO_VALTYPE`, one-step, standard recording routine.
 | Split valuation | `MBEW-BWTTY` of the header record (`BWTAR = space`) |
 | Valuation record | `MBEW` with `BWTAR`, `LVORM = space` |
 | PO history | `EKBE` (any record for `EBELN` / `EBELP`) |
+| New item | PO number initial or `$`-temporary, or no `EKPO` record for `EBELN` / `EBELP` |
 
 ## 2.4 Class `ZCL_IM_MM_PO_SPLIT_VAL`
 
@@ -144,7 +148,8 @@ Implements `IF_EX_ME_PROCESS_PO_CUST` (13 methods). Only `OPEN` and
 |---|---|---|
 | `C_OVERRIDE_USER_ENTRY` | `abap_false` | Override user entry (R2) |
 | `C_WARN_IF_MISSING` | `abap_false` | Warn if no table entry (message 024) |
-| `C_USE_FISCAL_YEAR` | `abap_false` | Use fiscal year (R3) |
+| `C_USE_FISCAL_YEAR` | `abap_true`  | Use fiscal year (R3) |
+| `C_REDETERMINE_NEW_ITEMS` | `abap_true` | Determine again on new items (R9) |
 
 **Methods**
 
@@ -160,6 +165,8 @@ Implements `IF_EX_ME_PROCESS_PO_CUST` (13 methods). Only `OPEN` and
 | `IS_SPLIT_VALUATED` | private | Split valuation check (buffered) |
 | `VALTYPE_EXISTS` | private | Valuation record check (buffered) |
 | `HAS_FOLLOW_ON_DOCS` | private | PO history check; skipped for new POs |
+| `GET_ITEM_STATE` | private | First processing of the item and new-item flag (buffered per item) |
+| `WARN_IF_VALTYPE_INVALID` | private | Warning 023 for a kept copied value (R10) |
 | `IS_FIRST_WARNING` | private | Issues each warning once (R8) |
 
 ## 2.5 Processing logic – `PROCESS_ITEM`
@@ -167,17 +174,20 @@ Implements `IF_EX_ME_PROCESS_PO_CUST` (13 methods). Only `OPEN` and
 1. Read the item with `GET_DATA( )`. Always read it fresh: other
    implementations may have changed the item in the same round.
 2. Exit if plant or material is empty, or the item is deleted (`LOEKZ`).
-3. If `BWTAR` is filled:
+3. Determine with `GET_ITEM_STATE` whether this is the first processing of a
+   new item. If so and `C_REDETERMINE_NEW_ITEMS` is set, skip step 4 (R9).
+4. If `BWTAR` is filled:
    - exit if `C_OVERRIDE_USER_ENTRY = abap_false`;
    - otherwise exit if `ELIKZ` is set or `HAS_FOLLOW_ON_DOCS` returns true.
-4. Determine material type, PO document date and year.
-5. Read the valuation type with `GET_VALTYPE_FROM_TABLE`. If empty: message 024
-   (if activated) and exit.
-6. Exit if the value equals the current `BWTAR`. This prevents endless
+5. Determine material type, PO document date and year.
+6. Read the valuation type with `GET_VALTYPE_FROM_TABLE`. If empty: message 024
+   (if activated); on re-determination, `WARN_IF_VALTYPE_INVALID` (R10); exit.
+7. Exit if the value equals the current `BWTAR`. This prevents endless
    re-processing after `SET_DATA`.
-7. Exit if the material is not split-valuated (`IS_SPLIT_VALUATED`).
-8. If `VALTYPE_EXISTS` returns false: message 023 and exit.
-9. Set `BWTAR` and call `IM_ITEM->SET_DATA( )`.
+8. Exit if the material is not split-valuated (`IS_SPLIT_VALUATED`).
+9. If `VALTYPE_EXISTS` returns false: message 023; on re-determination,
+   `WARN_IF_VALTYPE_INVALID` (R10); exit.
+10. Set `BWTAR` and call `IM_ITEM->SET_DATA( )`.
 
 Messages are raised with the macros of include `MM_MESSAGES_MAC`
 (`mmpur_business_obj_id`, `mmpur_message_forced`), linked to the item ID.
@@ -188,8 +198,12 @@ Messages are raised with the macros of include `MM_MESSAGES_MAC`
   split-valuation check and valuation records. "Not found" is buffered too.
 - Buffers are instance attributes, cleared in `OPEN`. This relies on the BAdI
   instance being reused within a PO. If SE18 shows *creation of new instances*,
-  the buffers must become `CLASS-DATA` (results stay correct, but warnings may
-  repeat and the buffers have no effect).
+  the buffers must become `CLASS-DATA` (warnings may repeat and the buffers
+  have no effect). This also affects R9: without a reused instance every
+  processing counts as the first one, so a user could no longer change the
+  valuation type on new items.
+- `EKPO` is read once per item and PO (new-item check), only for items of a
+  saved PO.
 - `T001W` is SAP-buffered; no own buffer.
 - `EKBE` is read only in override mode for items that already have a valuation
   type.
@@ -199,6 +213,10 @@ Messages are raised with the macros of include `MM_MESSAGES_MAC`
 - Warning 023 has no field link: the `mmpur_metafield` line in `PROCESS_ITEM`
   is commented out until the `MMMFD` constant for `BWTAR` is confirmed.
 - Changes to `ZPTP_PO_VALTYPE` during an open PO become visible with the next PO.
+- SAP leaves no copy marker on a PO item, so R9 cannot tell a copied value from
+  one typed by the user or passed through a BAPI before the first processing.
+- R9 does not cover a change of `BEDAT` into another year after the first
+  processing of the item.
 - Comments must stay inside class sections or methods. Comments outside them
   cause the error *"The class contains unknown comments which can't be stored"*.
 
@@ -228,7 +246,7 @@ Messages are raised with the macros of include `MM_MESSAGES_MAC`
    [ZCL_IM_MM_PO_SPLIT_VAL.abap](ZCL_IM_MM_PO_SPLIT_VAL.abap), set the constants,
    check syntax and activate (select all inactive objects).
 7. **Activate the implementation** – SE19, **Implementation is active** ticked,
-   activate. Expected: status Active; the 13 interface methods green, the 9
+   activate. Expected: status Active; the 13 interface methods green, the 11
    helper methods red (red = not part of the BAdI interface, not an error).
 8. **Data** – maintain `ZPTP_PO_VALTYPE` in SM30 (1.4).
 
@@ -250,6 +268,11 @@ valuation category set, valuation types with their own accounting records).
 | T7 | PO document date in another year | Line for that year is used |
 | T8 | ME22N on an item with a goods receipt (override on) | Valuation type isn't changed |
 | T9 | Item with tax code / jurisdiction | Tax fields unchanged |
+| T10 | ME21N with reference to a PO of the previous year (valuation type filled) | Valuation type of the current year from the table, no message |
+| T11 | As T10, then the user changes the valuation type and presses Enter | User's value is kept |
+| T12 | As T10, no table entry for the current year; copied valuation type flagged for deletion in `MBEW` | Copied value kept; warning 023 once |
+| T13 | ME22N: copy an item within a saved PO | New item gets the table value; the original item is unchanged |
+| T14 | `BAPI_PO_CREATE1` with `BWTAR` filled and a table entry | Table value replaces the BAPI value (R9) |
 
 Debugging: breakpoint in `IF_EX_ME_PROCESS_PO_CUST~PROCESS_ITEM`.
 
