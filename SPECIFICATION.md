@@ -7,8 +7,10 @@
 | Enhancement | BAdI `ME_PROCESS_PO_CUST` |
 | Enhancement implementation | `ZMM_PO_SPLIT_VAL_IMPL` |
 | Implementing class | `ZCL_IM_MM_PO_SPLIT_VAL` ([source](ZCL_IM_MM_PO_SPLIT_VAL.abap)) |
+| Mass update report | `ZMM_PO_SPLIT_VAL_UPDATE` ([source](ZMM_PO_SPLIT_VAL_UPDATE.abap)) |
 | Author | kas68 |
 | Date | 2026-09-29 |
+| Last update | 2026-10-02 – mass update report |
 
 ---
 
@@ -28,6 +30,8 @@ in a custom table.
 - Purchase order items created or changed in ME21N / ME22N and through the
   purchase order BAPIs (all go through `ME_PROCESS_PO_CUST`).
 - Materials that are split-valuated in the plant's valuation area.
+- Mass update of open purchase order items by report
+  `ZMM_PO_SPLIT_VAL_UPDATE`, mainly as a background job (see 1.8).
 
 **Out of scope**
 - Items without material (e.g. services, text items), deleted items.
@@ -44,12 +48,12 @@ in a custom table.
 | R2 | Optional (setting): the table value overwrites a user-entered value, but never on items with PO history (goods receipt, invoice, …) or marked delivery completed. |
 | R3 | The year is the year of the PO document date. Fiscal year of the company code by default; optionally the calendar year. |
 | R4 | Lookup order: first plant + material type + year; if not found, plant + empty material type + year (plant default). |
-| R5 | No table entry: the field stays empty. Optionally a warning is shown. |
-| R6 | The material must be split-valuated in the plant's valuation area; otherwise nothing happens. |
+| R5 | No table entry: the field stays as it is (empty, or a value kept under R1, R2 or R10). Optionally a warning is shown. |
+| R6 | The material must be split-valuated in the plant's valuation area; otherwise the valuation type is not set. Warning 024 may still be shown when activated (see 2.7). |
 | R7 | The valuation type must exist for the material in the valuation area (not flagged for deletion); otherwise a warning is shown and the field stays empty. |
 | R8 | Each warning is shown once per item and content. |
 | R9 | New items (PO not yet saved, or new item added in ME22N): on the first processing, a filled valuation type is determined again from the table (setting, on by default). This covers values copied from a reference PO or another item. A value typed by the user before the first Enter, or passed through a BAPI, is overwritten too; a later change by the user is kept. No message is shown when the value is replaced. |
-| R10 | If R9 cannot determine a value (no table entry, or the table value has no valuation record) the copied value is kept; if its own valuation record is missing or flagged for deletion, warning 023 is shown. |
+| R10 | If R9 cannot determine a value (no table entry, or the table value has no valuation record) the copied value is kept; if the material is split-valuated and the copied value's own valuation record is missing or flagged for deletion, warning 023 is shown. |
 
 ## 1.4 Maintenance of determination data
 
@@ -67,18 +71,26 @@ for each new year.
 
 ## 1.5 Messages
 
-Message class `ZPTP_SPLIT_VAL`, type **W** (warning – the PO can still be saved).
+Message class `ZPTP_SPLIT_VAL`. In the BAdI the messages are type **W**
+(warning – the PO can still be saved). In the report they are written to the
+output list (1.8).
 
 | No. | Text | When |
 |---|---|---|
-| 023 | Valuation type &1 not defined for material &2 in plant &3 | R7 – valuation record missing; R10 – copied value kept without valuation record |
-| 024 | No valuation type maintained in ZPTP_PO_VALTYPE for &1 / &2 / &3 | R5 – no table entry (only if activated) |
+| 023 | Valuation type &1 not defined for material &2 in plant &3 | R7 – valuation record missing; R10 – copied value kept without valuation record; report: U5 |
+| 024 | No valuation type maintained in ZPTP_PO_VALTYPE for &1 / &2 / &3 | R5 – no table entry (only if activated); report: U5 |
+| 100 | Fiscal year not determined for company code &1 and date &2 | Report: U3 |
+| 101 | Valuation type changed from &1 to &2 | Report: item changed |
+| 102 | Test run: valuation type would change from &1 to &2 | Report: test run |
+| 103 | &1 items selected, &2 changed, &3 already correct, &4 errors | Report: summary at the end of the run |
+| 104 | No open purchase order items selected | Report: nothing selected |
+| 105 | Enter a key date for option 'Key date' | Report: option "Key date" without a date |
 
 ## 1.6 Settings
 
 | Setting | Default | Effect |
 |---|---|---|
-| Override user entry | Off | On = rule R2 applies |
+| Override user entry | Off | On = rule R2 applies. Must stay **Off** while report `ZMM_PO_SPLIT_VAL_UPDATE` is used (see 1.8, U7). |
 | Warn if no table entry | Off | On = message 024 is shown |
 | Use fiscal year | On | On = the table holds fiscal years of the company code; Off = calendar years |
 | Determine again on new items | On | On = rule R9 applies; Off = a copied value counts as a user entry |
@@ -90,6 +102,62 @@ Settings are constants in the class (see 2.4); a change requires a transport.
 - Stock transport orders and account-assigned items are treated like stock
   items. To be confirmed by the business.
 - Warning 023 is not yet linked to the valuation type field on screen (see 2.7).
+- Warning 024, if activated, is also shown for materials without split
+  valuation (see 2.7). To be fixed before the setting is switched on.
+- Report: items with an invoice but no goods receipt are not updated (U2).
+  To be confirmed by the business.
+
+## 1.8 Mass update report `ZMM_PO_SPLIT_VAL_UPDATE`
+
+**Purpose** – The BAdI sets the valuation type when the PO is entered, based on
+the PO document date. The report sets it again on open items, based on the
+fiscal year of a key date – for example at the start of a new fiscal year, so
+that open items receive the valuation type of the new year before goods
+receipt. It is meant to run mainly as a background job.
+
+**Selection screen**
+
+| Field | Type | Meaning |
+|---|---|---|
+| Plant | Select-option | `EKPO-WERKS` |
+| Purchase order | Select-option | `EKPO-EBELN` |
+| Material | Select-option | `EKPO-MATNR` |
+| Run date of the program | Radio button (default) | Key date = date of the run |
+| Key date | Radio button + date field | Key date = date entered (field ready for input only with this option) |
+| Test run | Checkbox, default **on** | No update; shows what would change |
+
+All select-options empty = all open POs of the system.
+
+**Rules**
+
+| # | Rule |
+|---|---|
+| U1 | Only standard purchase orders; PO and item not deleted; item not delivery completed. |
+| U2 | Only items without any PO history (goods receipt, invoice, …) and without an inbound delivery. |
+| U3 | The year is the fiscal year of the key date in the item's company code. If it cannot be determined, the item is an error (no fallback to the calendar year, unlike R3). |
+| U4 | The valuation type is read from `ZPTP_PO_VALTYPE` with the lookup order R4, for the item's plant and material type. |
+| U5 | Only split-valuated materials. No table entry (024) or no valuation record for the new valuation type (023): the item is an error and is not changed. |
+| U6 | The valuation type is replaced whatever its current value, including a value entered by the user. Items that already have the right value are not changed. |
+| U7 | All items of one PO are changed together: if the change fails (e.g. PO locked in ME22N), no item of that PO is changed and all are listed as errors. No output (print, EDI) is sent to the vendor for the change. |
+| U8 | Test run: the change is fully checked but not saved. |
+
+**Output**
+
+- Summary message 103. Online: status bar; background: job log (SM37).
+- List of changed items (or items that would change in a test run) and errors:
+  message type, PO, item, plant, material, material type, fiscal year, old and
+  new valuation type, message. Online: ALV with sort, filter and export;
+  background: spool of the job.
+- Not listed: items already correct (only counted), items not selected (U1, U2,
+  material not split-valuated – not counted either). No list if there is
+  nothing to show; message 104 if no item is selected.
+- No application log (SLG1). The changes are traceable in the PO change
+  documents (ME23N → Environment → Item changes), with the job user. Test
+  runs and errors leave no trace after the job log and spool are deleted.
+
+**Background job** – Option "Run date of the program" uses the actual date of
+each run; a variant with this option needs no dynamic date. With option "Key
+date", the date saved in the variant is used.
 
 ---
 
@@ -106,6 +174,7 @@ Settings are constants in the class (see 2.4); a change requires a transport.
 | Custom table | Transparent table, delivery class C | SE11 | `ZPTP_PO_VALTYPE` |
 | Maintenance function group | Table maintenance generator | SE11 / SE80 | `ZPTP_PO_VALTYPE` |
 | Message class | Message class | SE91 | `ZPTP_SPLIT_VAL` |
+| Mass update report | Executable program | SE38 | `ZMM_PO_SPLIT_VAL_UPDATE` |
 
 ## 2.2 Table `ZPTP_PO_VALTYPE`
 
@@ -217,8 +286,111 @@ Messages are raised with the macros of include `MM_MESSAGES_MAC`
   one typed by the user or passed through a BAPI before the first processing.
 - R9 does not cover a change of `BEDAT` into another year after the first
   processing of the item.
+- R9 does not cover a change of material or plant on a new item after its
+  first processing: a filled valuation type is then kept like a user entry.
+- The table lookup (step 6) runs before the split-valuation check (step 8).
+  With `C_WARN_IF_MISSING` on, warning 024 is therefore also shown for
+  materials that are not split-valuated, in a plant / year without a table
+  line. No impact with the default setting (off); before switching it on, the
+  split-valuation check must move before the table lookup.
+- The protection of R2 (delivery completed, PO history) applies only to items
+  whose valuation type is already filled. An item with an empty valuation
+  type is filled even if it is flagged delivery completed.
+- Message variables are passed in internal format: in warning 023, a numeric
+  material number (&2) is shown with leading zeros.
 - Comments must stay inside class sections or methods. Comments outside them
   cause the error *"The class contains unknown comments which can't be stored"*.
+
+## 2.8 Report `ZMM_PO_SPLIT_VAL_UPDATE`
+
+Executable program with message class `ZPTP_SPLIT_VAL` (`MESSAGE-ID`) and one
+local class `LCL_APP`. The table lookup, the valuation record check and their
+buffers are copies of the BAdI class logic (the class methods are private).
+
+**Selection screen**
+
+| Name | Definition |
+|---|---|
+| `S_WERKS` | `SELECT-OPTIONS FOR ekpo-werks` |
+| `S_EBELN` | `SELECT-OPTIONS FOR ekpo-ebeln` |
+| `S_MATNR` | `SELECT-OPTIONS FOR ekpo-matnr` |
+| `P_RUN` | Radio button group `DATE`, default, `USER-COMMAND date` |
+| `P_KEY` | Radio button group `DATE` |
+| `P_DATE` | `TYPE sy-datum`, `MODIF ID key` |
+| `P_TEST` | Checkbox, default `abap_true` |
+
+Events:
+- `AT SELECTION-SCREEN OUTPUT` – `P_DATE` ready for input only when `P_KEY` is
+  set.
+- `AT SELECTION-SCREEN` – error 105 if `P_KEY` is set and `P_DATE` is empty, on
+  execution (`ONLI`), job scheduling (`SJOB`) or in background only.
+- `START-OF-SELECTION` – `NEW lcl_app( )->run( )`.
+
+**Methods of `LCL_APP`**
+
+| Method | Purpose |
+|---|---|
+| `RUN` | Main logic (below) |
+| `SELECT_ITEMS` | Selection of open items (one SELECT) |
+| `DETERMINE` | Fiscal year, valuation type and checks for one item; returns a log line |
+| `CHANGE_PO` | `BAPI_PO_CHANGE` for all items to change of one PO, commit or rollback |
+| `GET_FISCAL_YEAR` | `FI_PERIOD_DETERMINE` for the key date, buffered per company code |
+| `GET_VALTYPE_FROM_TABLE` / `READ_VALTYPE` | Lookup order R4, buffered |
+| `VALTYPE_EXISTS` | Valuation record check, buffered |
+| `DISPLAY_LOG` / `SET_COLUMN_TEXT` | ALV output (`CL_SALV_TABLE`) |
+
+**Selection (`SELECT_ITEMS`)**
+
+`EKKO` ⋈ `EKPO` ⋈ `MARA` (material type) ⋈ `T001W` (valuation area) ⋈ `MBEW`
+(header record, `BWTAR = space`), with:
+
+| Condition | Meaning |
+|---|---|
+| `EKKO-BSTYP = 'F'`, `EKKO-LOEKZ = space` | Standard PO, not deleted |
+| `EKPO-LOEKZ = space`, `EKPO-ELIKZ = space` | Item not deleted, not delivery completed |
+| `MBEW-BWTTY <> space` | Material split-valuated in the valuation area |
+| `NOT EXISTS EKBE` for `EBELN` / `EBELP` | No PO history |
+| `NOT EXISTS EKES` with `VBELN <> space` | No inbound delivery |
+| Select-options | Plant, PO, material |
+
+**Processing logic (`RUN`)**
+
+1. Key date = `SY-DATLO` (`P_RUN`) or `P_DATE` (`P_KEY`).
+2. Select the items; message 104 and exit if none.
+3. Per PO (`LOOP AT ... GROUP BY ebeln`), per item (`DETERMINE`):
+   - fiscal year of the key date (`FI_PERIOD_DETERMINE`, item `BUKRS`);
+     error 100 if not determined;
+   - valuation type from `ZPTP_PO_VALTYPE` (R4); error 024 if none;
+   - same as the current `BWTAR`: counted as already correct, not listed;
+   - no valuation record in `MBEW` (`LVORM = space`): error 023;
+   - otherwise the item is collected for the change.
+4. `CHANGE_PO` for the collected items of the PO: `BAPI_PO_CHANGE` with
+   `POITEM-VAL_TYPE` / `POITEMX-VAL_TYPE`, `TESTRUN = P_TEST`,
+   `NO_MESSAGING = abap_true`.
+   - Any `E` / `A` message: `BAPI_TRANSACTION_ROLLBACK`; all items of the PO get
+     type E and the text of the first `E` / `A` message.
+   - Otherwise: `BAPI_TRANSACTION_COMMIT` with `WAIT` (rollback in test run);
+     items get type S and message 101 (102 in test run).
+5. Summary message 103 (type S – job log in background).
+6. ALV list of changed items and errors (spool in background).
+
+**Interaction with the BAdI** – `BAPI_PO_CHANGE` runs the BAdI. The item is
+saved and its `BWTAR` filled, so with `C_OVERRIDE_USER_ENTRY = abap_false` the
+BAdI keeps the value passed by the report. With the setting on, the BAdI would
+replace it with the value for the PO document date.
+
+**Known limitations**
+
+- No fallback to the calendar year when `FI_PERIOD_DETERMINE` fails (U3).
+- Any PO history excludes the item, not only goods receipts (U2).
+- An error on one item (e.g. BAPI check) blocks all items of the same PO (U7);
+  the message shown on each item is the first error of the PO.
+- No application log (SLG1); job log and spool follow the system's deletion
+  jobs.
+- Empty select-options select all open POs of the system: the SELECT reads the
+  whole of `EKPO` (acceptable in background).
+- Items deleted, delivery completed, with history or not split-valuated are
+  not counted in the summary.
 
 ---
 
@@ -249,6 +421,22 @@ Messages are raised with the macros of include `MM_MESSAGES_MAC`
    activate. Expected: status Active; the 13 interface methods green, the 11
    helper methods red (red = not part of the BAdI interface, not an error).
 8. **Data** – maintain `ZPTP_PO_VALTYPE` in SM30 (1.4).
+9. **Report messages** – add messages 100 to 105 to `ZPTP_SPLIT_VAL` (1.5).
+   Keep the placeholder order:
+   - 100: &1 = company code, &2 = date
+   - 101, 102: &1 = old valuation type, &2 = new valuation type
+   - 103: &1 = selected, &2 = changed, &3 = already correct, &4 = errors
+10. **Report** – SE38, create executable program `ZMM_PO_SPLIT_VAL_UPDATE`,
+    paste [ZMM_PO_SPLIT_VAL_UPDATE.abap](ZMM_PO_SPLIT_VAL_UPDATE.abap), check
+    syntax and activate.
+11. **Text elements** – selection texts: `S_WERKS` Plant, `S_EBELN` Purchase
+    order, `S_MATNR` Material, `P_RUN` Run date of the program, `P_KEY` Key
+    date, `P_DATE` Key date for fiscal year, `P_TEST` Test run (or *Dictionary
+    ref.* for the select-options). Text symbols `T01` to `T04` (ALV column
+    headings): create them from the source by double-click.
+12. **Background job** – create a variant (test run off, date option as
+    required) and schedule the job in SM36 with this variant. Run it first with
+    test run on and check the spool.
 
 ---
 
@@ -276,14 +464,33 @@ valuation category set, valuation types with their own accounting records).
 
 Debugging: breakpoint in `IF_EX_ME_PROCESS_PO_CUST~PROCESS_ITEM`.
 
+**Report `ZMM_PO_SPLIT_VAL_UPDATE`**
+
+| # | Case | Expected |
+|---|---|---|
+| U-T1 | Test run, open item with another valuation type in the table for the key date's fiscal year | Listed with type S and message 102; PO unchanged |
+| U-T2 | As U-T1, test run off | Message 101; valuation type changed; change document in ME23N; no new output to the vendor |
+| U-T3 | Item already with the right valuation type | Not listed; counted as already correct |
+| U-T4 | Item with goods receipt, invoice or inbound delivery | Not selected |
+| U-T5 | Item deleted or delivery completed; material not split-valuated | Not selected |
+| U-T6 | No table entry for the fiscal year | Error 024; item unchanged |
+| U-T7 | Table value without valuation record for the material | Error 023; item unchanged |
+| U-T8 | PO open in ME22N by another user during the run | All items of the PO listed as errors with the lock message; PO unchanged |
+| U-T9 | Option "Key date" with a date in another fiscal year | Valuation type of that fiscal year |
+| U-T10 | Option "Key date" with empty date | Error 105 on execution; switching the radio buttons gives no error |
+| U-T11 | Option "Run date" in a background job | Fiscal year of the job's run date |
+| U-T12 | Background job | Summary 103 in the job log, list in the spool |
+| U-T13 | User-entered valuation type differing from the table | Replaced by the table value (U6) |
+
 ---
 
 # Part 5 – Transport
 
 | Request | Content |
 |---|---|
-| Workbench | Table `ZPTP_PO_VALTYPE`, function group `ZPTP_PO_VALTYPE`, message class `ZPTP_SPLIT_VAL`, class `ZCL_IM_MM_PO_SPLIT_VAL`, enhancement implementation `ZMM_PO_SPLIT_VAL_IMPL` |
+| Workbench | Table `ZPTP_PO_VALTYPE`, function group `ZPTP_PO_VALTYPE`, message class `ZPTP_SPLIT_VAL`, class `ZCL_IM_MM_PO_SPLIT_VAL`, enhancement implementation `ZMM_PO_SPLIT_VAL_IMPL`, report `ZMM_PO_SPLIT_VAL_UPDATE` (with text elements) |
 | Customizing | SM30 entries of `ZPTP_PO_VALTYPE` (client-specific – transport or maintain in each client and system) |
 
-Import order: table and message class → class → enhancement implementation
-(or everything on one request).
+Import order: table and message class → class → enhancement implementation →
+report (or everything on one request). Variants and background jobs are not
+transported; create them in each system.
