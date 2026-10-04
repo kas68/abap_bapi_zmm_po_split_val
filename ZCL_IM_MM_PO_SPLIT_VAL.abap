@@ -16,7 +16,7 @@ CLASS zcl_im_mm_po_split_val DEFINITION
 * again on the first processing (C_REDETERMINE_NEW_ITEMS).
 * Writes BWTAR only, never MWSKZ / TXJCD - runs side by side with the
 * SAP Tax Service implementation (BAdI is multiple use).
-* Messages: class ZPTP_SPLIT_VAL, 023 and 024.
+* Messages: class ZPTP_SPLIT_VAL, 106 and 107.
 *---------------------------------------------------------------------*
     INTERFACES if_ex_me_process_po_cust.
 
@@ -156,7 +156,7 @@ CLASS zcl_im_mm_po_split_val DEFINITION
       EXPORTING ev_first_call TYPE abap_bool
                 ev_new        TYPE abap_bool.
 
-    "! Warning 023 for the item's own BWTAR when its valuation record
+    "! Warning 106 for the item's own BWTAR when its valuation record
     "! is missing - used when a copied value is kept
     METHODS warn_if_valtype_invalid
       IMPORTING is_item TYPE mepoitem.
@@ -241,10 +241,10 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
     IF lv_bwtar IS INITIAL.
       IF c_warn_if_missing = abap_true
       AND is_first_warning( iv_id    = ls_item-id
-                            iv_msgno = '024'
+                            iv_msgno = '107'
                             iv_key   = |{ ls_item-werks }/{ lv_mtart }/{ lv_gjahr }| ) = abap_true.
         mmpur_business_obj_id ls_item-id.
-        mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '024'
+        mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '107'
                              ls_item-werks lv_mtart lv_gjahr space.
       ENDIF.
       IF lv_redetermine = abap_true.
@@ -270,12 +270,12 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
                        iv_bwkey = lv_bwkey
                        iv_bwtar = lv_bwtar ) = abap_false.
       IF is_first_warning( iv_id    = ls_item-id
-                           iv_msgno = '023'
+                           iv_msgno = '106'
                            iv_key   = |{ ls_item-matnr }/{ ls_item-werks }/{ lv_bwtar }| ) = abap_true.
         mmpur_business_obj_id ls_item-id.
         " Optional field link - look up the BWTAR constant in type group
         " MMMFD (SE11) and enable: mmpur_metafield mmmfd_<valuation_type>.
-        mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '023'
+        mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '106'
                              lv_bwtar ls_item-matnr ls_item-werks space.
       ENDIF.
       IF lv_redetermine = abap_true.
@@ -509,10 +509,10 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
     ENDIF.
 
     IF is_first_warning( iv_id    = is_item-id
-                         iv_msgno = '023'
+                         iv_msgno = '106'
                          iv_key   = |{ is_item-matnr }/{ is_item-werks }/{ is_item-bwtar }| ) = abap_true.
       mmpur_business_obj_id is_item-id.
-      mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '023'
+      mmpur_message_forced 'W' 'ZPTP_SPLIT_VAL' '106'
                            is_item-bwtar is_item-matnr is_item-werks space.
     ENDIF.
 
