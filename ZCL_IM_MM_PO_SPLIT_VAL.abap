@@ -6,9 +6,12 @@ CLASS zcl_im_mm_po_split_val DEFINITION
   PUBLIC SECTION.
 *---------------------------------------------------------------------*
 * BAdI ME_PROCESS_PO_CUST - enhancement impl. ZMM_PO_SPLIT_VAL_IMPL
-* Default PO item valuation type (BWTAR) from table ZPTP_PO_VALTYPE:
+* Default PO item valuation type (BWTAR) from table ZPTP_301_VALTYPE:
 *   1. plant + material type (MARA-MTART) + year
-*   2. plant + blank material type + year (plant default)
+*   2. plant + blank material type + year
+*   3. blank plant + material type + year
+*   4. blank plant + blank material type + year (global default)
+* Blank = all plants / all material types; only ACTIVE entries count.
 * Year = year of the PO document date (EKKO-BEDAT), calendar year or
 * fiscal year of the company code (C_USE_FISCAL_YEAR).
 * Only for split-valuated materials with an existing valuation record.
@@ -80,8 +83,8 @@ CLASS zcl_im_mm_po_split_val DEFINITION
     "! default has an entry for the year
     CONSTANTS c_warn_if_missing TYPE abap_bool VALUE abap_false.
 
-    "! abap_false = ZPTP_PO_VALTYPE-GJAHR is the calendar year of BEDAT
-    "! abap_true  = ZPTP_PO_VALTYPE-GJAHR is the fiscal year of BEDAT
+    "! abap_false = ZPTP_301_VALTYPE-GJAHR is the calendar year of BEDAT
+    "! abap_true  = ZPTP_301_VALTYPE-GJAHR is the fiscal year of BEDAT
     "!              in the item's company code
     CONSTANTS c_use_fiscal_year TYPE abap_bool VALUE abap_true.
 
@@ -336,16 +339,31 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
 
   METHOD get_valtype_from_table.
 
-    " 1. Entry for the material type
+    " Most specific entry wins; blank WERKS / MTART = all plants / types
+    " 1. plant + material type
     IF iv_mtart IS NOT INITIAL.
       rv_bwtar = read_valtype( iv_werks = iv_werks
                                iv_mtart = iv_mtart
                                iv_gjahr = iv_gjahr ).
     ENDIF.
 
-    " 2. Plant default: entry with blank material type
+    " 2. plant, all material types
     IF rv_bwtar IS INITIAL.
       rv_bwtar = read_valtype( iv_werks = iv_werks
+                               iv_mtart = space
+                               iv_gjahr = iv_gjahr ).
+    ENDIF.
+
+    " 3. all plants, material type
+    IF rv_bwtar IS INITIAL AND iv_mtart IS NOT INITIAL.
+      rv_bwtar = read_valtype( iv_werks = space
+                               iv_mtart = iv_mtart
+                               iv_gjahr = iv_gjahr ).
+    ENDIF.
+
+    " 4. all plants, all material types
+    IF rv_bwtar IS INITIAL.
+      rv_bwtar = read_valtype( iv_werks = space
                                iv_mtart = space
                                iv_gjahr = iv_gjahr ).
     ENDIF.
@@ -364,10 +382,11 @@ CLASS zcl_im_mm_po_split_val IMPLEMENTATION.
              INTO TABLE mt_valtype_buffer ASSIGNING <ls_buf>.
 
       SELECT SINGLE bwtar
-        FROM zptp_po_valtype
+        FROM zptp_301_valtype
         WHERE werks = @iv_werks
           AND mtart = @iv_mtart
           AND gjahr = @iv_gjahr
+          AND active = @abap_true
         INTO @<ls_buf>-bwtar.               " stays initial if not found
     ENDIF.
 

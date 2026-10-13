@@ -2,10 +2,13 @@
 * Report ZPTP_PO_SPLIT_VAL_UPDATE
 * Mass update of the valuation type (BWTAR) on open purchase order
 * items, mainly for background jobs.
-* Valuation type from table ZPTP_PO_VALTYPE (same rules as BAdI class
+* Valuation type from table ZPTP_301_VALTYPE (same rules as BAdI class
 * ZCL_IM_MM_PO_SPLIT_VAL):
 *   1. plant + material type (MARA-MTART) + year
-*   2. plant + blank material type + year (plant default)
+*   2. plant + blank material type + year
+*   3. blank plant + material type + year
+*   4. blank plant + blank material type + year (global default)
+* Blank = all plants / all material types; only ACTIVE entries count.
 * Year = fiscal year of the key date in the item's company code. Key
 * date = run date of the program (P_RUN, SY-DATLO) or P_DATE (P_KEY).
 * Open item = standard PO (BSTYP F), item and PO not deleted, not
@@ -473,16 +476,31 @@ CLASS lcl_app IMPLEMENTATION.
 
   METHOD get_valtype_from_table.
 
-    " 1. Entry for the material type
+    " Most specific entry wins; blank WERKS / MTART = all plants / types
+    " 1. plant + material type
     IF iv_mtart IS NOT INITIAL.
       rv_bwtar = read_valtype( iv_werks = iv_werks
                                iv_mtart = iv_mtart
                                iv_gjahr = iv_gjahr ).
     ENDIF.
 
-    " 2. Plant default: entry with blank material type
+    " 2. plant, all material types
     IF rv_bwtar IS INITIAL.
       rv_bwtar = read_valtype( iv_werks = iv_werks
+                               iv_mtart = space
+                               iv_gjahr = iv_gjahr ).
+    ENDIF.
+
+    " 3. all plants, material type
+    IF rv_bwtar IS INITIAL AND iv_mtart IS NOT INITIAL.
+      rv_bwtar = read_valtype( iv_werks = space
+                               iv_mtart = iv_mtart
+                               iv_gjahr = iv_gjahr ).
+    ENDIF.
+
+    " 4. all plants, all material types
+    IF rv_bwtar IS INITIAL.
+      rv_bwtar = read_valtype( iv_werks = space
                                iv_mtart = space
                                iv_gjahr = iv_gjahr ).
     ENDIF.
@@ -501,10 +519,11 @@ CLASS lcl_app IMPLEMENTATION.
              INTO TABLE mt_valtype_buffer ASSIGNING <ls_buf>.
 
       SELECT SINGLE bwtar
-        FROM zptp_po_valtype
+        FROM zptp_301_valtype
         WHERE werks = @iv_werks
           AND mtart = @iv_mtart
           AND gjahr = @iv_gjahr
+          AND active = @abap_true
         INTO @<ls_buf>-bwtar.               " stays initial if not found
     ENDIF.
 

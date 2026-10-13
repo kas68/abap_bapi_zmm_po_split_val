@@ -2,7 +2,7 @@
 
 Implementation of BAdI `ME_PROCESS_PO_CUST` that fills the valuation type
 (`BWTAR`) of purchase order items for split-valuated materials, based on the
-custom table `ZPTP_PO_VALTYPE`.
+custom table `ZPTP_301_VALTYPE`.
 
 Report `ZPTP_PO_SPLIT_VAL_UPDATE` sets the valuation type again on open PO items
 (no history, no inbound delivery) from the same table, for the fiscal year of
