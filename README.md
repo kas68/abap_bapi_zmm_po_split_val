@@ -12,5 +12,9 @@ production orders without goods receipt against the same table.
 
 - BAdI class: [ZCL_IM_MM_PO_SPLIT_VAL.abap](ZCL_IM_MM_PO_SPLIT_VAL.abap)
 - Mass update report: [ZPTP_PO_SPLIT_VAL_UPDATE.abap](ZPTP_PO_SPLIT_VAL_UPDATE.abap)
+- Batch master report: [ZPTP_PROD_BATCH_VALTYPE.abap](ZPTP_PROD_BATCH_VALTYPE.abap) –
+  sets the valuation type in the batch master (`MCHA-BWTAR`) of the batches of
+  open production order items without goods receipt in a plant, from the same
+  table, when the batch has no stock
 - Functional and technical specification, setup, tests and transport:
   [SPECIFICATION.md](SPECIFICATION.md)
