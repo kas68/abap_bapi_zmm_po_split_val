@@ -12,9 +12,12 @@ production orders without goods receipt against the same table.
 
 - BAdI class: [ZCL_IM_MM_PO_SPLIT_VAL.abap](ZCL_IM_MM_PO_SPLIT_VAL.abap)
 - Mass update report: [ZPTP_PO_SPLIT_VAL_UPDATE.abap](ZPTP_PO_SPLIT_VAL_UPDATE.abap)
-- Batch master report: [ZPTP_PROD_BATCH_VALTYPE.abap](ZPTP_PROD_BATCH_VALTYPE.abap) –
-  sets the valuation type in the batch master (`MCHA-BWTAR`) of the batches of
-  open production order items without goods receipt in a plant, from the same
-  table, when the batch has no stock
+- Document alignment report (PO items, open inbound deliveries, batches):
+  [ZPTP_VALTYPE_DOCSALIGN.abap](ZPTP_VALTYPE_DOCSALIGN.abap)
 - Functional and technical specification, setup, tests and transport:
   [SPECIFICATION.md](SPECIFICATION.md)
+
+Report `ZPTP_PROD_BATCH_VALTYPE` (valuation type in the batch master of open
+production orders) has been moved to WRICEF project
+HBM-Wricefs Badi Workorders_Goodsmvt. It still uses table `ZPTP_301_VALTYPE` and
+messages 111–116 of class `ZPTP_SPLIT_VAL`.
