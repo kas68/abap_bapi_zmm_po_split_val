@@ -16,14 +16,24 @@
 * Scenario 1 - item without inbound delivery: PO item updated only.
 * Scenario 2 - item with inbound deliveries (EKES-VBELN). Only delivery
 *   items without goods receipt (LIPS-WBSTA <> C) are processed:
-*   2.1 with batch: the batch master (MCHA-BWTAR) is changed first if
+*   2.1 with a new batch (no material movement of the batch in the
+*       plant, MSEG): the batch master (MCHA-BWTAR) is changed first if
 *       it differs (BAPI_BATCH_CHANGE), then the delivery item;
-*   2.2 without batch: the delivery item only.
+*   2.2 without batch: the delivery item only;
+*   2.3 with an existing batch (any material movement in the plant):
+*       the batch master is not changed. Its valuation type replaces
+*       the table value for the PO item and all its delivery items
+*       (also new batches of the item). Existing batches of one PO
+*       item with different valuation types: item error (133).
 *   Delivery item (LIPS-BWTAR) changed with WS_DELIVERY_UPDATE_2, one
 *   call per delivery. Then the PO item, only if all its open delivery
 *   items are aligned - so it gets the valuation type of its deliveries.
 * PO items: BAPI_PO_CHANGE, one call per PO, without output
 * determination (NO_MESSAGING).
+* Flow = PO item, its open delivery items and their batches. When one
+*   object of a flow is listed, the objects of the flow already correct
+*   are listed too (136, no light) - never changed, never posted.
+*   Option P_ALIGN: flows already aligned are listed as well (136).
 * Items with a goods receipt (partially or fully received) are never
 *   changed, nor their deliveries and batches. Option P_GR lists them
 *   (130), online not postable (131), with the last goods receipt
@@ -31,7 +41,9 @@
 * Test run: no batch or delivery change; BAPI_PO_CHANGE with TESTRUN.
 * After each real change the object is read again from the database
 * (MCHA, LIPS, EKPO); only a confirmed change is green in the ALV,
-* otherwise the line is an error (129).
+* otherwise the line is an error (129). Valuation type taken from an
+* existing batch: orange in the ALV instead of yellow (proposals; on the
+* batch line its old / new valuation type).
 * Run modes:
 *   Background - all changes in one run, as described above (also for
 *     background jobs); list of changes and errors at the end.
@@ -42,17 +54,22 @@
 *     item all its open delivery items with the new valuation type.
 *     Failed rows can be posted again. Not possible in background.
 * S/4HANA: goods movement status in LIPS-WBSTA (ECC: VBUP-WBSTA).
-* Messages: class ZPTP_SPLIT_VAL, 100 - 104, 106, 107, 117 - 131.
+* Messages: class ZPTP_SPLIT_VAL, 100 - 104, 106, 107, 117 - 136.
 *---------------------------------------------------------------------*
 REPORT zptp_valtype_docsalign MESSAGE-ID zptp_split_val.
 
-TABLES ekpo.
+TABLES: ekpo, likp.
 
 SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE TEXT-b01.
 SELECT-OPTIONS: s_werks FOR ekpo-werks DEFAULT '8Q01',
-                s_ebeln FOR ekpo-ebeln.
+                s_ebeln FOR ekpo-ebeln,
+                " PO items with an inbound delivery in the range - their
+                " whole flow is processed (all open delivery items)
+                s_vbeln FOR likp-vbeln.
 " Items with goods receipt and nothing to receive: listed, not changed
 PARAMETERS p_gr AS CHECKBOX DEFAULT abap_false.
+" Flows already aligned (no object to change): listed (136), display only
+PARAMETERS p_align AS CHECKBOX DEFAULT abap_false.
 SELECTION-SCREEN END OF BLOCK b01.
 
 " Background = as before; Online = proposals posted row by row from ALV
@@ -74,6 +91,7 @@ CLASS lcl_app DEFINITION FINAL.
     TYPES:
       ty_scen   TYPE c LENGTH 3,
       ty_object TYPE c LENGTH 10,
+      ty_source TYPE c LENGTH 5,
 
       BEGIN OF ty_item,
         ebeln         TYPE ebeln,
@@ -91,6 +109,10 @@ CLASS lcl_app DEFINITION FINAL.
         blocked_vbeln TYPE vbeln_vl,    " first delivery not aligned
         blocked_posnr TYPE posnr_vl,
         gr_only       TYPE abap_bool,   " P_GR: goods receipt, listed only
+        bwtar_ref     TYPE bwtar_d,     " valuation type of existing batch
+        ref_charg     TYPE charg_d,     " batch giving BWTAR_REF
+        ref_error     TYPE bapi_msg,    " existing batches inconsistent
+        source        TYPE ty_source,   " origin of BWTAR_NEW
       END OF ty_item,
       tt_item TYPE SORTED TABLE OF ty_item WITH UNIQUE KEY ebeln ebelp,
 
@@ -124,11 +146,13 @@ CLASS lcl_app DEFINITION FINAL.
         gjahr     TYPE gjahr,
         bwtar_old TYPE bwtar_d,
         bwtar_new TYPE bwtar_d,
+        source    TYPE ty_source,   " table or existing batch
         message   TYPE bapi_msg,
         todo      TYPE abap_bool,   " online: proposal not posted yet
         posted    TYPE abap_bool,   " online: posted from the ALV
         gr_only   TYPE abap_bool,   " P_GR: goods receipt, never posted
         verified  TYPE abap_bool,   " new value read back from the DB
+        nochange  TYPE abap_bool,   " already correct, listed for the flow
         logidx    TYPE i,           " online: line of MT_LOG
       END OF ty_log,
       tt_log TYPE STANDARD TABLE OF ty_log WITH EMPTY KEY,
@@ -153,6 +177,8 @@ CLASS lcl_app DEFINITION FINAL.
         dlv_bwtar_new TYPE bwtar_d,
         bat_bwtar_old TYPE bwtar_d,
         bat_bwtar_new TYPE bwtar_d,
+        bat_used      TYPE abap_bool,   " batch with material movement
+        source        TYPE ty_source,
         scen          TYPE ty_scen,     " ALV column order = field order
         message       TYPE bapi_msg,
         msgty         TYPE bapi_mtype,
@@ -193,6 +219,10 @@ CLASS lcl_app DEFINITION FINAL.
         matnr TYPE matnr,
         werks TYPE werks_d,
         charg TYPE charg_d,
+        found TYPE abap_bool,   " batch master exists (MCHA)
+        bwtar TYPE bwtar_d,     " MCHA-BWTAR at selection
+        used  TYPE abap_bool,   " material movement in the plant
+        done  TYPE abap_bool,   " checked / changed in this run
         ok    TYPE abap_bool,
       END OF ty_batch_buffer,
       tt_batch_buffer TYPE HASHED TABLE OF ty_batch_buffer
@@ -211,7 +241,12 @@ CLASS lcl_app DEFINITION FINAL.
         delivery TYPE ty_scen VALUE '2',
         batch    TYPE ty_scen VALUE '2.1',
         no_batch TYPE ty_scen VALUE '2.2',
+        used     TYPE ty_scen VALUE '2.3',  " existing batch, reference
       END OF c_scen,
+      BEGIN OF c_source,
+        table TYPE ty_source VALUE 'TABLE',
+        batch TYPE ty_source VALUE 'BATCH',
+      END OF c_source,
       BEGIN OF c_object,
         po_item  TYPE ty_object VALUE 'PO ITEM',
         delivery TYPE ty_object VALUE 'DELIVERY',
@@ -254,6 +289,10 @@ CLASS lcl_app DEFINITION FINAL.
     METHODS select_items
       RETURNING VALUE(rt_item) TYPE tt_item.
 
+    "! S_VBELN: only PO items with an inbound delivery in the range
+    METHODS filter_by_delivery
+      CHANGING ct_item TYPE tt_item.
+
     "! P_GR: last goods receipt document per item (MT_GR_DOC)
     METHODS read_gr_documents
       IMPORTING it_item TYPE tt_item.
@@ -266,6 +305,20 @@ CLASS lcl_app DEFINITION FINAL.
     METHODS select_deliveries
       EXPORTING et_dlv  TYPE tt_dlv
       CHANGING  ct_item TYPE tt_item.
+
+    "! Batch masters of the delivery items and their material movements
+    METHODS read_batches
+      IMPORTING it_dlv TYPE tt_dlv.
+
+    "! Valuation type of existing batches as reference of the PO item
+    METHODS set_batch_reference
+      IMPORTING it_dlv  TYPE tt_dlv
+      CHANGING  ct_item TYPE tt_item.
+
+    "! Batch with a material movement in the plant (see READ_BATCHES)
+    METHODS is_batch_used
+      IMPORTING is_dlv         TYPE ty_dlv
+      RETURNING VALUE(rv_used) TYPE abap_bool.
 
     "! Log line with the new valuation type, or MSGTY = E on error
     METHODS determine
@@ -296,6 +349,11 @@ CLASS lcl_app DEFINITION FINAL.
       IMPORTING iv_vbeln TYPE vbeln_vl
                 iv_posnr TYPE posnr_vl
       CHANGING  cs_item  TYPE ty_item.
+
+    "! Objects already correct in a listed flow (136) - after all changes
+    METHODS list_unchanged
+      IMPORTING it_dlv  TYPE tt_dlv
+                it_item TYPE tt_item.
 
     METHODS update_purchase_orders
       IMPORTING it_item TYPE tt_item.
@@ -379,6 +437,10 @@ CLASS lcl_app IMPLEMENTATION.
 
     DATA(lt_item) = select_items( ).
 
+    IF s_vbeln[] IS NOT INITIAL.
+      filter_by_delivery( CHANGING ct_item = lt_item ).
+    ENDIF.
+
     IF lt_item IS INITIAL.
       MESSAGE s104.
       RETURN.
@@ -394,10 +456,16 @@ CLASS lcl_app IMPLEMENTATION.
     select_deliveries( IMPORTING et_dlv  = DATA(lt_dlv)
                        CHANGING  ct_item = lt_item ).
 
+    " Existing batches give the valuation type instead of the table
+    read_batches( lt_dlv ).
+    set_batch_reference( EXPORTING it_dlv  = lt_dlv
+                         CHANGING  ct_item = lt_item ).
+
     LOOP AT lt_item ASSIGNING FIELD-SYMBOL(<ls_item>).
       DATA(ls_log) = determine( <ls_item> ).
       <ls_item>-gjahr     = ls_log-gjahr.
       <ls_item>-bwtar_new = ls_log-bwtar_new.
+      <ls_item>-source    = ls_log-source.
       IF ls_log-msgty = 'E'.
         <ls_item>-failed = abap_true.
         mv_errors = mv_errors + 1.
@@ -410,6 +478,10 @@ CLASS lcl_app IMPLEMENTATION.
                       CHANGING  ct_item = lt_item ).
 
     update_purchase_orders( lt_item ).
+
+    " Display only - added after processing, so never changed
+    list_unchanged( it_dlv  = lt_dlv
+                    it_item = lt_item ).
 
     " Summaries - go to the job log in background
     MESSAGE s123 WITH mv_dlv_selected mv_dlv_changed mv_batch_changed
@@ -496,6 +568,41 @@ CLASS lcl_app IMPLEMENTATION.
     LOOP AT lt_received ASSIGNING FIELD-SYMBOL(<ls_received>).
       <ls_received>-gr_only = abap_true.
       INSERT <ls_received> INTO TABLE rt_item.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD filter_by_delivery.
+
+    TYPES:
+      BEGIN OF ty_key,
+        ebeln TYPE ebeln,
+        ebelp TYPE ebelp,
+      END OF ty_key.
+
+    DATA lt_key TYPE SORTED TABLE OF ty_key WITH NON-UNIQUE KEY ebeln ebelp.
+
+    IF ct_item IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    " Confirmations with a delivery of the range; the whole flow of the
+    " PO item stays selected, also its deliveries outside the range
+    SELECT ebeln, ebelp
+      FROM ekes
+      FOR ALL ENTRIES IN @ct_item
+      WHERE ebeln =  @ct_item-ebeln
+        AND ebelp =  @ct_item-ebelp
+        AND vbeln <> @space
+        AND vbeln IN @s_vbeln
+      INTO CORRESPONDING FIELDS OF TABLE @lt_key.
+
+    LOOP AT ct_item ASSIGNING FIELD-SYMBOL(<ls_item>).
+      IF NOT line_exists( lt_key[ ebeln = <ls_item>-ebeln
+                                  ebelp = <ls_item>-ebelp ] ).
+        DELETE ct_item.
+      ENDIF.
     ENDLOOP.
 
   ENDMETHOD.
@@ -619,6 +726,105 @@ CLASS lcl_app IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD read_batches.
+
+    CLEAR mt_batch_buffer.
+
+    LOOP AT it_dlv INTO DATA(ls_dlv) WHERE charg IS NOT INITIAL.
+      INSERT VALUE #( matnr = ls_dlv-matnr
+                      werks = ls_dlv-werks
+                      charg = ls_dlv-charg )
+             INTO TABLE mt_batch_buffer.        " duplicates ignored
+    ENDLOOP.
+
+    IF mt_batch_buffer IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT matnr, werks, charg, bwtar
+      FROM mcha
+      FOR ALL ENTRIES IN @mt_batch_buffer
+      WHERE matnr = @mt_batch_buffer-matnr
+        AND werks = @mt_batch_buffer-werks
+        AND charg = @mt_batch_buffer-charg
+      INTO TABLE @DATA(lt_mcha).
+
+    " Any material document item of the batch in the plant, reversals
+    " included (S/4HANA: MSEG is read from MATDOC)
+    SELECT matnr, werks, charg
+      FROM mseg
+      FOR ALL ENTRIES IN @mt_batch_buffer
+      WHERE matnr = @mt_batch_buffer-matnr
+        AND werks = @mt_batch_buffer-werks
+        AND charg = @mt_batch_buffer-charg
+      INTO TABLE @DATA(lt_mseg).
+
+    LOOP AT mt_batch_buffer ASSIGNING FIELD-SYMBOL(<ls_buf>).
+      READ TABLE lt_mcha INTO DATA(ls_mcha)
+           WITH KEY matnr = <ls_buf>-matnr
+                    werks = <ls_buf>-werks
+                    charg = <ls_buf>-charg.
+      IF sy-subrc = 0.
+        <ls_buf>-found = abap_true.
+        <ls_buf>-bwtar = ls_mcha-bwtar.
+      ENDIF.
+      <ls_buf>-used = xsdbool(
+        line_exists( lt_mseg[ matnr = <ls_buf>-matnr
+                              werks = <ls_buf>-werks
+                              charg = <ls_buf>-charg ] ) ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD set_batch_reference.
+
+    " One valuation type per PO item: the one of its existing batches
+    LOOP AT it_dlv INTO DATA(ls_dlv) WHERE charg IS NOT INITIAL.
+
+      READ TABLE mt_batch_buffer INTO DATA(ls_batch)
+           WITH TABLE KEY matnr = ls_dlv-matnr
+                          werks = ls_dlv-werks
+                          charg = ls_dlv-charg.
+      " New batch, or batch not found (error 122 in ALIGN_BATCH)
+      IF sy-subrc <> 0 OR ls_batch-used = abap_false
+      OR ls_batch-found = abap_false.
+        CONTINUE.
+      ENDIF.
+
+      READ TABLE ct_item ASSIGNING FIELD-SYMBOL(<ls_item>)
+           WITH TABLE KEY ebeln = ls_dlv-ebeln
+                          ebelp = ls_dlv-ebelp.
+      IF sy-subrc <> 0 OR <ls_item>-ref_error IS NOT INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      IF ls_batch-bwtar IS INITIAL.
+        MESSAGE e132 WITH ls_batch-charg INTO <ls_item>-ref_error.
+      ELSEIF <ls_item>-bwtar_ref IS INITIAL.
+        <ls_item>-bwtar_ref = ls_batch-bwtar.
+        <ls_item>-ref_charg = ls_batch-charg.
+      ELSEIF <ls_item>-bwtar_ref <> ls_batch-bwtar.
+        MESSAGE e133 WITH <ls_item>-ref_charg <ls_item>-bwtar_ref
+                          ls_batch-charg ls_batch-bwtar
+                INTO <ls_item>-ref_error.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD is_batch_used.
+
+    rv_used = VALUE #( mt_batch_buffer[ matnr = is_dlv-matnr
+                                        werks = is_dlv-werks
+                                        charg = is_dlv-charg ]-used
+                       OPTIONAL ).
+
+  ENDMETHOD.
+
+
   METHOD determine.
 
     rs_log = VALUE #( scen      = is_item-scen
@@ -628,23 +834,38 @@ CLASS lcl_app IMPLEMENTATION.
                       werks     = is_item-werks
                       matnr     = is_item-matnr
                       mtart     = is_item-mtart
-                      bwtar_old = is_item-bwtar ).
+                      bwtar_old = is_item-bwtar
+                      source    = c_source-table ).
 
     rs_log-gjahr = get_fiscal_year( is_item-bukrs ).
-    IF rs_log-gjahr IS INITIAL.
-      rs_log-msgty = 'E'.
-      MESSAGE e100 WITH is_item-bukrs mv_date INTO rs_log-message.
+
+    IF is_item-ref_error IS NOT INITIAL.
+      rs_log-msgty   = 'E'.
+      rs_log-source  = c_source-batch.
+      rs_log-message = is_item-ref_error.
       RETURN.
     ENDIF.
 
-    rs_log-bwtar_new = get_valtype_from_table( iv_werks = is_item-werks
-                                               iv_mtart = is_item-mtart
-                                               iv_gjahr = rs_log-gjahr ).
-    IF rs_log-bwtar_new IS INITIAL.
-      rs_log-msgty = 'E'.
-      MESSAGE e107 WITH is_item-werks is_item-mtart rs_log-gjahr
-              INTO rs_log-message.
-      RETURN.
+    IF is_item-bwtar_ref IS NOT INITIAL.
+      " Existing batch: no table lookup, fiscal year for information only
+      rs_log-bwtar_new = is_item-bwtar_ref.
+      rs_log-source    = c_source-batch.
+    ELSE.
+      IF rs_log-gjahr IS INITIAL.
+        rs_log-msgty = 'E'.
+        MESSAGE e100 WITH is_item-bukrs mv_date INTO rs_log-message.
+        RETURN.
+      ENDIF.
+
+      rs_log-bwtar_new = get_valtype_from_table( iv_werks = is_item-werks
+                                                 iv_mtart = is_item-mtart
+                                                 iv_gjahr = rs_log-gjahr ).
+      IF rs_log-bwtar_new IS INITIAL.
+        rs_log-msgty = 'E'.
+        MESSAGE e107 WITH is_item-werks is_item-mtart rs_log-gjahr
+                INTO rs_log-message.
+        RETURN.
+      ENDIF.
     ENDIF.
 
     " Checked also if the PO item is correct: the value goes to the
@@ -685,6 +906,8 @@ CLASS lcl_app IMPLEMENTATION.
         DATA(ls_log) = VALUE ty_log(
           scen      = COND #( WHEN <ls_member>-charg IS INITIAL
                               THEN c_scen-no_batch
+                              WHEN is_batch_used( <ls_member> ) = abap_true
+                              THEN c_scen-used
                               ELSE c_scen-batch )
           object    = c_object-delivery
           ebeln     = <ls_item>-ebeln
@@ -697,9 +920,10 @@ CLASS lcl_app IMPLEMENTATION.
           mtart     = <ls_item>-mtart
           gjahr     = <ls_item>-gjahr
           bwtar_old = <ls_member>-bwtar
-          bwtar_new = <ls_item>-bwtar_new ).
+          bwtar_new = <ls_item>-bwtar_new
+          source    = <ls_item>-source ).
 
-        " 2.1: the batch master is saved before the delivery
+        " 2.1: the batch master is saved before the delivery; 2.3: kept
         IF <ls_member>-charg IS NOT INITIAL
         AND align_batch( is_dlv  = <ls_member>
                          is_item = <ls_item> ) = abap_false.
@@ -746,17 +970,23 @@ CLASS lcl_app IMPLEMENTATION.
          WITH TABLE KEY matnr = is_dlv-matnr
                         werks = is_dlv-werks
                         charg = is_dlv-charg.
-    IF sy-subrc = 0.
+    IF sy-subrc <> 0.                        " filled by READ_BATCHES
+      INSERT VALUE #( matnr = is_dlv-matnr
+                      werks = is_dlv-werks
+                      charg = is_dlv-charg )
+             INTO TABLE mt_batch_buffer ASSIGNING <ls_buf>.
+    ELSEIF <ls_buf>-done = abap_true.
       rv_ok = <ls_buf>-ok.
       RETURN.
     ENDIF.
 
-    INSERT VALUE #( matnr = is_dlv-matnr
-                    werks = is_dlv-werks
-                    charg = is_dlv-charg )
-           INTO TABLE mt_batch_buffer ASSIGNING <ls_buf>.
+    <ls_buf>-done = abap_true.
 
-    DATA(ls_log) = VALUE ty_log( scen      = c_scen-batch
+    DATA(lv_scen) = COND ty_scen( WHEN <ls_buf>-used = abap_true
+                                  THEN c_scen-used
+                                  ELSE c_scen-batch ).
+
+    DATA(ls_log) = VALUE ty_log( scen      = lv_scen
                                  object    = c_object-batch
                                  ebeln     = is_item-ebeln
                                  ebelp     = is_item-ebelp
@@ -767,21 +997,30 @@ CLASS lcl_app IMPLEMENTATION.
                                  charg     = is_dlv-charg
                                  mtart     = is_item-mtart
                                  gjahr     = is_item-gjahr
-                                 bwtar_new = is_item-bwtar_new ).
+                                 bwtar_old = <ls_buf>-bwtar
+                                 bwtar_new = is_item-bwtar_new
+                                 source    = is_item-source ).
 
-    SELECT SINGLE bwtar
-      FROM mcha
-      WHERE matnr = @is_dlv-matnr
-        AND werks = @is_dlv-werks
-        AND charg = @is_dlv-charg
-      INTO @ls_log-bwtar_old.
-    IF sy-subrc <> 0.
+    IF <ls_buf>-found = abap_false.
       ls_log-msgty = 'E'.
       MESSAGE e122 WITH is_dlv-charg |{ is_dlv-matnr ALPHA = OUT }|
                         is_dlv-werks
               INTO ls_log-message.
       APPEND ls_log TO mt_log.
       RETURN.                                " not aligned, buffered
+    ENDIF.
+
+    " 2.3: existing batch - never changed, its valuation type is the
+    " reference of the PO item (SET_BATCH_REFERENCE), listed for info
+    IF <ls_buf>-used = abap_true.
+      ls_log-bwtar_new = ls_log-bwtar_old.
+      ls_log-source    = c_source-batch.
+      ls_log-msgty     = 'I'.
+      MESSAGE i134 WITH is_dlv-charg ls_log-bwtar_old INTO ls_log-message.
+      APPEND ls_log TO mt_log.
+      <ls_buf>-ok = xsdbool( ls_log-bwtar_old = is_item-bwtar_new ).
+      rv_ok = <ls_buf>-ok.
+      RETURN.
     ENDIF.
 
     " Same valuation type: batch master unchanged, not logged
@@ -986,6 +1225,112 @@ CLASS lcl_app IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD list_unchanged.
+
+    DATA lt_add TYPE tt_log.
+
+    " Items in error (D2): deliveries not processed, target unknown
+    LOOP AT it_item INTO DATA(ls_item) WHERE failed = abap_false.
+
+      " Only flows with at least one listed object; P_ALIGN: all flows
+      IF p_align = abap_false
+      AND NOT line_exists( mt_log[ ebeln = ls_item-ebeln
+                                   ebelp = ls_item-ebelp ] ).
+        CONTINUE.
+      ENDIF.
+
+      DATA(ls_base) = VALUE ty_log( msgty    = 'I'
+                                    nochange = abap_true
+                                    ebeln    = ls_item-ebeln
+                                    ebelp    = ls_item-ebelp
+                                    werks    = ls_item-werks
+                                    matnr    = ls_item-matnr
+                                    mtart    = ls_item-mtart
+                                    gjahr    = ls_item-gjahr
+                                    source   = ls_item-source ).
+
+      " PO item counted as already correct (103), not logged
+      IF NOT line_exists( mt_log[ object = c_object-po_item
+                                  ebeln  = ls_item-ebeln
+                                  ebelp  = ls_item-ebelp ] )
+      AND ls_item-bwtar = ls_item-bwtar_new.
+        DATA(ls_add) = ls_base.
+        ls_add-scen      = ls_item-scen.
+        ls_add-object    = c_object-po_item.
+        ls_add-bwtar_old = ls_item-bwtar.
+        ls_add-bwtar_new = ls_item-bwtar.
+        MESSAGE i136 WITH ls_add-bwtar_old INTO ls_add-message.
+        APPEND ls_add TO lt_add.
+      ENDIF.
+
+      LOOP AT it_dlv INTO DATA(ls_dlv) WHERE ebeln = ls_item-ebeln
+                                         AND ebelp = ls_item-ebelp.
+
+        DATA(lv_scen) = COND ty_scen(
+          WHEN ls_dlv-charg IS INITIAL
+          THEN c_scen-no_batch
+          WHEN is_batch_used( ls_dlv ) = abap_true
+          THEN c_scen-used
+          ELSE c_scen-batch ).
+
+        " Batch: once, and not if listed in another flow (shared batch)
+        IF ls_dlv-charg IS NOT INITIAL
+        AND NOT line_exists( mt_log[ object = c_object-batch
+                                     matnr  = ls_dlv-matnr
+                                     werks  = ls_dlv-werks
+                                     charg  = ls_dlv-charg ] )
+        AND NOT line_exists( lt_add[ object = c_object-batch
+                                     matnr  = ls_dlv-matnr
+                                     werks  = ls_dlv-werks
+                                     charg  = ls_dlv-charg ] ).
+          DATA(lv_bwtar) = VALUE bwtar_d(
+                             mt_batch_buffer[ matnr = ls_dlv-matnr
+                                              werks = ls_dlv-werks
+                                              charg = ls_dlv-charg ]-bwtar
+                             OPTIONAL ).
+          IF lv_bwtar = ls_item-bwtar_new.
+            ls_add = ls_base.
+            ls_add-scen      = lv_scen.
+            ls_add-object    = c_object-batch.
+            ls_add-vbeln     = ls_dlv-vbeln.
+            ls_add-posnr     = ls_dlv-posnr.
+            ls_add-werks     = ls_dlv-werks.
+            ls_add-matnr     = ls_dlv-matnr.
+            ls_add-charg     = ls_dlv-charg.
+            ls_add-bwtar_old = lv_bwtar.
+            ls_add-bwtar_new = lv_bwtar.
+            MESSAGE i136 WITH lv_bwtar INTO ls_add-message.
+            APPEND ls_add TO lt_add.
+          ENDIF.
+        ENDIF.
+
+        IF NOT line_exists( mt_log[ object = c_object-delivery
+                                    vbeln  = ls_dlv-vbeln
+                                    posnr  = ls_dlv-posnr ] )
+        AND ls_dlv-bwtar = ls_item-bwtar_new.
+          ls_add = ls_base.
+          ls_add-scen      = lv_scen.
+          ls_add-object    = c_object-delivery.
+          ls_add-vbeln     = ls_dlv-vbeln.
+          ls_add-posnr     = ls_dlv-posnr.
+          ls_add-werks     = ls_dlv-werks.
+          ls_add-matnr     = ls_dlv-matnr.
+          ls_add-charg     = ls_dlv-charg.
+          ls_add-bwtar_old = ls_dlv-bwtar.
+          ls_add-bwtar_new = ls_dlv-bwtar.
+          MESSAGE i136 WITH ls_dlv-bwtar INTO ls_add-message.
+          APPEND ls_add TO lt_add.
+        ENDIF.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+    APPEND LINES OF lt_add TO mt_log.
+
+  ENDMETHOD.
+
+
   METHOD update_purchase_orders.
 
     DATA lt_change TYPE tt_log.
@@ -1010,7 +1355,8 @@ CLASS lcl_app IMPLEMENTATION.
                                      mtart     = <ls_member>-mtart
                                      gjahr     = <ls_member>-gjahr
                                      bwtar_old = <ls_member>-bwtar
-                                     bwtar_new = <ls_member>-bwtar_new ).
+                                     bwtar_new = <ls_member>-bwtar_new
+                                     source    = <ls_member>-source ).
 
         IF <ls_member>-blocked_vbeln IS NOT INITIAL.
           ls_log-msgty = 'E'.
@@ -1303,6 +1649,19 @@ CLASS lcl_app IMPLEMENTATION.
                          iv_medium  = 'Delivery item'(t39)
                          iv_long    = 'Delivery note item'(t40) ).
         set_column_text( io_columns = lo_columns
+                         iv_name    = 'BAT_USED'
+                         iv_short   = 'Bat moved'(t44)
+                         iv_medium  = 'Batch with movement'(t45)
+                         iv_long    = 'Batch with material movement'(t46) ).
+        DATA(lo_bat_used) = CAST cl_salv_column_table(
+                              lo_columns->get_column( 'BAT_USED' ) ).
+        lo_bat_used->set_cell_type( if_salv_c_cell_type=>checkbox ).
+        set_column_text( io_columns = lo_columns
+                         iv_name    = 'SOURCE'
+                         iv_short   = 'Reference'(t41)
+                         iv_medium  = 'VType reference'(t42)
+                         iv_long    = 'Valuation type reference'(t43) ).
+        set_column_text( io_columns = lo_columns
                          iv_name    = 'SCEN'
                          iv_short   = 'Scenario'(t05)
                          iv_medium  = 'Scenario'(t06) ).
@@ -1377,6 +1736,8 @@ CLASS lcl_app IMPLEMENTATION.
                               THEN '2'
                               WHEN ls_log-msgty = 'S'
                               THEN '3' ).
+      " Information only (existing batch 134, already correct 136): no
+      " light - nothing done, nothing to post
       CASE ls_log-object.
         WHEN c_object-po_item.
           ls_out-po_bwtar_old  = ls_log-bwtar_old.
@@ -1389,16 +1750,32 @@ CLASS lcl_app IMPLEMENTATION.
         WHEN c_object-batch.
           ls_out-bat_bwtar_old = ls_log-bwtar_old.
           ls_out-bat_bwtar_new = ls_log-bwtar_new.
+          ls_out-bat_used      = VALUE #( mt_batch_buffer[
+                                            matnr = ls_log-matnr
+                                            werks = ls_log-werks
+                                            charg = ls_log-charg ]-used
+                                          OPTIONAL ).
           lv_new_column        = 'BAT_BWTAR_NEW'.
       ENDCASE.
+      " Existing batch kept as reference - batch old / new orange
       " Change confirmed on the database (background or posted online) -
-      " green; test run / online proposal (would be changed) - yellow
-      IF ls_log-verified = abap_true.
+      " green; test run / online proposal (would be changed) - yellow,
+      " orange if the value comes from an existing batch
+      IF ls_log-object = c_object-batch AND ls_log-msgty = 'I'
+      AND ls_log-nochange = abap_false.
+        ls_out-t_color = VALUE #( ( fname = 'BAT_BWTAR_OLD'
+                                    color-col = col_group )
+                                  ( fname = 'BAT_BWTAR_NEW'
+                                    color-col = col_group ) ).
+      ELSEIF ls_log-verified = abap_true.
         ls_out-t_color = VALUE #( ( fname = lv_new_column
                                     color-col = col_positive ) ).
       ELSEIF ls_log-msgty = 'S'.
         ls_out-t_color = VALUE #( ( fname = lv_new_column
-                                    color-col = col_total ) ).
+                                    color-col = COND #(
+                                      WHEN ls_log-source = c_source-batch
+                                      THEN col_group
+                                      ELSE col_total ) ) ).
       ENDIF.
       APPEND ls_out TO mt_out.
     ENDLOOP.
@@ -1425,8 +1802,23 @@ CLASS lcl_app IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    DATA(lo_selections) = mo_alv->get_selections( ).
+    DATA(lt_rows) = lo_selections->get_selected_rows( ).
+
+    " SALV cannot disable single rows: lines of an existing batch (never
+    " changed) are removed from the selection and shown deselected
+    DATA(lv_count) = lines( lt_rows ).
+    LOOP AT lt_rows INTO DATA(lv_sel).
+      IF  mt_out[ lv_sel ]-object   = c_object-batch
+      AND mt_out[ lv_sel ]-bat_used = abap_true.
+        DELETE lt_rows.
+      ENDIF.
+    ENDLOOP.
+    IF lines( lt_rows ) <> lv_count.
+      lo_selections->set_selected_rows( lt_rows ).
+    ENDIF.
+
     " Selected ALV rows -> lines of MT_LOG
-    DATA(lt_rows) = mo_alv->get_selections( )->get_selected_rows( ).
     post_selected( VALUE #( FOR lv_row IN lt_rows
                             ( mt_out[ lv_row ]-logidx ) ) ).
 

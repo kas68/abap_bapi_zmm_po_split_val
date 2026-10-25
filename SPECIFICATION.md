@@ -9,8 +9,8 @@
 | Implementing class | `ZCL_IM_MM_PO_SPLIT_VAL` ([source](ZCL_IM_MM_PO_SPLIT_VAL.abap)) |
 | Document alignment report | `ZPTP_VALTYPE_DOCSALIGN` ([source](ZPTP_VALTYPE_DOCSALIGN.abap)) |
 | Author | kas68 |
-| Version | 1.2 |
-| Date | 2026-10-21 |
+| Version | 1.6 |
+| Date | 2026-10-22 |
 
 ---
 
@@ -33,7 +33,7 @@ in a custom table.
 - Alignment of the valuation type of open PO items, of their open inbound
   deliveries and of the batches on these deliveries by report
   `ZPTP_VALTYPE_DOCSALIGN`, in background (also as a job) or online with
-  posting row by row (see 1.8).
+  posting row by row (see 1.8 and 1.9).
 
 **Out of scope**
 - Items without material (e.g. services, text items), deleted items.
@@ -77,7 +77,7 @@ for each new year.
 Message class `ZPTP_SPLIT_VAL`, shared with other programs: numbers 000–099
 belong to them and must not be reused; this development uses 100 and above.
 In the BAdI the messages are type **W**
-(warning – the PO can still be saved). Numbers 105 and 108 – 110 are reserved
+(warning – the PO can still be saved). Numbers 105, 108 – 110 and 135 are reserved
 and must not be reused.
 
 | No. | Text | When |
@@ -109,6 +109,10 @@ Messages of report `ZPTP_VALTYPE_DOCSALIGN` only (texts maintained in SE91):
 | 129 | Change not confirmed on the database | &1 expected, &2 found | Real change: valuation type read back after the commit differs |
 | 130 (W) | Goods receipt posted – item not changed | &1 material document | Option *Items with goods receipt*: item partially or fully received, listed only |
 | 131 | Rows with goods receipt cannot be posted | &1 number of such rows | Online: *Post* with a selection containing an item with goods receipt – nothing posted |
+| 132 | Existing batch without valuation type | &1 batch | D11: batch with material movements, `MCHA-BWTAR` empty – PO item error |
+| 133 | Batch &1 (&2) and batch &3 (&4) differ | &1 batch, &2 valuation type, &3 batch, &4 valuation type | D11: two existing batches of one PO item disagree – PO item error |
+| 134 (I) | Batch &1 used: valuation type &2 kept | &1 batch, &2 valuation type | D11: batch line, batch master not changed |
+| 136 (I) | Valuation type &1 already correct | &1 valuation type | D7: object of a listed flow that needs no change – display only |
 
 ## 1.6 Settings
 
@@ -128,6 +132,14 @@ Settings are constants in the class (see 2.4); a change requires a transport.
 - Warning 106 is not yet linked to the valuation type field on screen (see 2.7).
 - Warning 107, if activated, is also shown for materials without split
   valuation (see 2.7). To be fixed before the setting is switched on.
+- Report `ZPTP_VALTYPE_DOCSALIGN`: a batch counts as *existing* when it has
+  any material document item (`MSEG`, reversals included) for the same
+  material and plant – movements of the same batch number in other plants are
+  not considered. To be confirmed by the business.
+- Report `ZPTP_VALTYPE_DOCSALIGN`: when a PO item has both an existing and a
+  new batch, the new batch is changed to the valuation type of the existing
+  one (not to the table value), so that the PO item has one valuation type
+  for all its goods receipts (D11). To be confirmed by the business.
 - Report `ZPTP_VALTYPE_DOCSALIGN`, online mode: dependent objects are not
   added automatically – a delivery item with a batch needs the batch row
   posted first (or in the same selection), a PO item its delivery rows (D9).
@@ -146,7 +158,9 @@ year, before goods receipt.
 |---|---|---|
 | Plant | Select-option (frame *Selection*), default `8Q01` | `EKPO-WERKS` |
 | Purchase order | Select-option (frame *Selection*) | `EKPO-EBELN` |
+| Inbound delivery | Select-option (frame *Selection*) | `LIKP-VBELN`. Selects the PO items that have a confirmation (`EKES`) with an inbound delivery in the range. The whole flow of these PO items is processed – also their open delivery items outside the range, so that the PO item stays aligned with all its deliveries (D6). Items with goods receipt (option) are filtered the same way. |
 | Items with goods receipt | Checkbox (frame *Selection*), default **off** | Also lists split-valuated PO items with a goods receipt (`EKET-WEMNG > 0`), partially or fully received – warning 130, never changed or posted. Without the option these items are not selected (items with a goods receipt are never changed, nor their deliveries and batches). Adds the column *Material document* (last goods receipt, `EKBE`, `VGABE = 1`, not reversals) for all listed items. |
+| Aligned flows | Checkbox (frame *Selection*), default **off** | Also lists the flows (PO item, its open delivery items and their batches) where every object already has the right valuation type – lines 136, display only, never changed or posted. Without the option these flows are not listed (D7). |
 | Background | Radio button (frame *Run mode*) | All changes in one run (also as a background job) |
 | Online | Radio button (frame *Run mode*), default | Proposals in an ALV, posted row by row |
 | Test run | Checkbox, default **on** | Background mode only: no change, shows what would change. Not ready for input in online mode. |
@@ -157,26 +171,30 @@ year, before goods receipt.
 |---|---|
 | D1 | Open PO item: standard PO, PO and item not deleted, not delivery completed, no return item, quantity still to be received on a schedule line, no goods receipt yet (partially received items are not changed). Only split-valuated materials. |
 | D2 | The year is the fiscal year of the run date in the item's company code (error 100 if not determined). The valuation type is read with the lookup order R4 (error 107 if none) and must have its own valuation record (error 106). An item in error is not processed, nor are its deliveries. |
-| D3 | Scenario 1 – item without inbound delivery: only the PO item is changed. Scenario 2 – item with inbound deliveries: only delivery items without goods receipt are processed; 2.1 with batch, 2.2 without batch. |
-| D4 | 2.1: the batch master is changed first if its valuation type differs (once per batch); if this fails, the delivery item is not changed (124). |
+| D3 | Scenario 1 – item without inbound delivery: only the PO item is changed. Scenario 2 – item with inbound deliveries: only delivery items without goods receipt are processed; 2.1 with a new batch, 2.2 without batch, 2.3 with an existing batch (D11). |
+| D4 | 2.1: the batch master of a new batch (no material movement in the plant) is changed first if its valuation type differs (once per batch); if this fails, the delivery item is not changed (124). |
 | D5 | The delivery items are changed together per delivery: all or none. |
 | D6 | Order of the changes: all batches, then all delivery items, then the PO items – also within the same PO. The PO item is changed only when all its open delivery items are aligned (otherwise 121), so it gets the valuation type of its deliveries. All items of one PO are changed together, without output to the vendor. |
-| D7 | Objects that already have the right valuation type are not changed and not listed (PO items are counted as already correct). |
+| D7 | Objects that already have the right valuation type are never changed. *Flow* = a PO item, its open delivery items and their batches. When at least one object of a flow is listed (change, proposal, error, information 134), the objects of the flow that need no change are listed too (136, no status light, no colour): display only – not processed in background, not postable online. When no object of the flow is listed, nothing is listed (the PO item is counted as already correct, 103), unless option *Aligned flows* is set: then all objects of the flow are listed with 136. |
 | D8 | Background mode: test run = everything checked, nothing saved. |
 | D9 | Online mode: the program first runs as a test run; each change found is a proposal. The user selects rows and chooses *Post* (confirmation popup). The selected rows are posted in the order batches → delivery items → PO items. A delivery item with a batch is posted only if the batch already has the new valuation type (124); a PO item with deliveries only if all its open delivery items have it (121) – both read again from the database. A failed row can be posted again; errors of the simulation cannot be posted. |
 | D10 | Online mode cannot run in background (126). |
+| D11 | 2.3 – existing batch (at least one material movement of the batch in the plant): the batch master is **never** changed. Its valuation type (`MCHA-BWTAR`) replaces the table value for the PO item: the delivery items of the PO item (if different) and the PO item get it; new batches of the same PO item too. No table lookup is needed (errors 100 / 107 do not apply); the valuation record check (106) still applies. The batch is listed once as information (134). Errors on the PO item: existing batch without valuation type (132), existing batches with different valuation types (133) – the item and its deliveries are then not processed. |
 
 **Output**
 
 - Summary messages 123 (deliveries) and 103 (PO items). Online: status bar;
   background: job log.
 - ALV list of changes (or proposed changes) and errors: plant (first column),
-  status light (green = success / proposal, yellow = warning, red = error),
+  status light (green = success / proposal, yellow = warning, red = error,
+  none = information only: existing batch 134, already correct 136),
   PO, object (PO item, delivery, batch), PO item, delivery, delivery item,
   material document (last goods receipt, only with option *Items with goods
   receipt*),
   material, batch, material type, fiscal year, one old / new pair of columns
-  per object, scenario, message and message type (before *Posted*). Sorted by PO number ascending and grouped by
+  per object, *Batch with movement* (checkbox, batch lines only: ticked when the
+  batch has a material movement in the plant, scenario 2.3), reference
+  (`TABLE` / `BATCH`), scenario, message and message type (before *Posted*). Sorted by PO number ascending and grouped by
   PO (number shown once, line after each PO), then in processing order:
   batches, delivery items, PO items, each by item; the item number is shown on
   every line:
@@ -193,10 +211,104 @@ year, before goods receipt.
   delivery item (`LIPS`) or PO item (`EKPO`) is read again and must have the
   new valuation type; otherwise the line is an error (129). Error lines are
   not coloured.
+- **Orange** marks the valuation types taken from an existing batch (D11):
+  - on the batch line (134, batch master not changed), the cells *Bat VT
+    old* and *Bat VT new*;
+  - the *new* cell of delivery and PO lines is orange instead of yellow for a
+    change that would be made; a real change confirmed on the database stays
+    green;
+  - no other cell or line is orange. Column *Reference* (after the batch
+    columns) shows `TABLE` or `BATCH`, without colour.
+- Lines with 136 (already correct, D7) have no status light and no colour.
 - Online mode only: column *Posted* (checkbox), rows selectable, function
   *Post* in the toolbar; after posting, message 128 and the list is refreshed.
 - Background: list in the spool of the job. No application log (SLG1); changes
   are traceable in the change documents of the PO, delivery and batch.
+
+## 1.9 Scenarios of report `ZPTP_VALTYPE_DOCSALIGN`
+
+The scenario is shown in the column *Scenario* of the list. *Old* is the
+valuation type on the document, *new* the one determined from
+`ZPTP_301_VALTYPE` for the PO item (D2). Delivery items and batches always get
+the new valuation type of their PO item.
+
+**Main scenarios**
+
+| Scenario | Starting situation | Processing (real run) | Lines in the list |
+|---|---|---|---|
+| 1 | Open PO item, no inbound delivery (no `EKES` line with a delivery) | PO item changed with `BAPI_PO_CHANGE` | PO item (101) |
+| 2.1 | Open PO item with an open inbound delivery item **with batch** | (1) batch master changed if it differs, (2) delivery item, (3) PO item | Batch (117), delivery item (119), PO item (101) |
+| 2.2 | Open PO item with an open inbound delivery item **without batch** | (1) delivery item, (2) PO item | Delivery item (119), PO item (101) |
+| 2.3 | Open PO item with an open inbound delivery item with an **existing batch** (material movement of the batch in the plant) | (1) batch master **not** changed, its valuation type is the reference, (2) delivery item set to it, (3) PO item set to it | Batch (134, orange), delivery item (119), PO item (101); *Reference* = `BATCH` |
+
+In a test run (background) or as an online proposal, the same lines are shown
+with messages 118, 120 and 102 and yellow *new* cells; nothing is saved. The
+PO item line keeps scenario *2* (it may have deliveries of both kinds); the
+batch and delivery lines show *2.1*, *2.2* or *2.3*. In scenario 2.3 the
+*new* cells of the proposals are orange instead of yellow.
+
+**Variants**
+
+| # | Situation | Behaviour |
+|---|---|---|
+| V1 | All objects already have the new valuation type | Nothing changed, nothing listed (no change in the flow) – with option *Aligned flows*: all objects listed with 136; the PO item is counted as *already correct* (103) |
+| V2 | PO item correct, delivery item (and / or batch) different | Delivery item (and batch) changed; the PO item is listed with 136 (display only) and counted as already correct |
+| V3 | New batch already correct, delivery item different | Batch not changed, listed with 136; the delivery item (and PO item, if needed) changed |
+| V4 | New batch different, delivery item already correct | Batch changed (117); the delivery item is listed with 136 |
+| V5 | One PO item with several inbound deliveries | Each delivery changed in its own call; the PO item is changed only when all its open delivery items are aligned (D6) |
+| V6 | One delivery with items of several PO items (same or different POs) | All items of the delivery changed in one call: all or none (D5). On error, every PO item concerned is not changed (121) |
+| V7 | Several items of one PO | All items to change go into one `BAPI_PO_CHANGE` call: all or none. An item blocked by its delivery (121) or in error (D2) is left out of the call; the other items are still changed |
+| V8 | Same batch on several delivery items | Batch checked and changed once; the result applies to all these delivery items |
+| V9 | Batch split on the delivery (main item with sub-items) | Only the sub-items (with the batches) are processed; the main item is not changed and not listed |
+| V10 | Delivery item with goods receipt (`WBSTA = C`) next to open ones | The received delivery item is ignored; the open ones are processed. If all delivery items are received, the PO item is changed alone (no blocking) |
+| V11 | PO item with a goods receipt (`EKET-WEMNG > 0`), option *Items with goods receipt* off | Not selected: neither the PO item nor its deliveries and batches are changed or listed |
+| V12 | As V11, option on | Listed only (warning 130, yellow light) with old / new valuation type and the last GR material document; never changed. Online: a selection containing such a row is refused (131) |
+| V13 | Existing batch, delivery item and PO item already have its valuation type | Batch line 134 (orange), delivery item and PO item with 136; nothing changed |
+| V14 | Existing batch, table value differs from the batch | The table value is ignored; delivery item and PO item get the batch value |
+| V15 | One PO item with an existing batch and a new batch (same or another delivery) | The new batch is changed to the valuation type of the existing batch (117, *Reference* = `BATCH`, orange proposal); delivery items and PO item get it as well |
+| V16 | Existing batch, no table entry for the year (or fiscal year not determined) | No error: the batch value is used (D11) |
+| V17 | Batch shared by several PO items, listed in the flow of one of them | The batch is listed once, in the flow of the first PO item; it is not repeated with 136 in the other flows |
+| V18 | PO item in error (D2: 100, 106, 107, 132, 133) | Only the PO item line E; its deliveries and batches are not listed (no target valuation type) |
+
+**Error scenarios**
+
+| # | Situation | Result |
+|---|---|---|
+| E1 | Fiscal year of the run date not determined for the company code | PO item line E (100); item and its deliveries / batches not processed |
+| E2 | No active table entry for plant / material type / fiscal year (not for 2.3, see V16) | PO item line E (107); item and its deliveries / batches not processed |
+| E3 | Table value (or 2.3: batch value) without own valuation record (`MBEW`, or flagged for deletion) | PO item line E (106); item and its deliveries / batches not processed. Checked even if the PO item is already correct |
+| E4 | Batch master not found (`MCHA`) | Batch line E (122); delivery item E (124); PO item E (121) |
+| E5 | Batch change refused by SAP (e.g. stock on the batch) | Batch line E (BAPI message); delivery item E (124); PO item E (121) |
+| E6 | Delivery change fails (`WS_DELIVERY_UPDATE_2`) | All changed items of this delivery E (SAP message, or 125); their PO items E (121). Batches already changed stay changed |
+| E7 | `BAPI_PO_CHANGE` returns an error (e.g. PO locked) | All items of this PO in the call E (BAPI message); deliveries and batches already changed stay changed |
+| E8 | Change committed, but the valuation type read back differs | Line E (129). For a delivery item, its PO item is not changed (121) |
+| E9 | PO item already correct, but one of its delivery items not aligned (E4 – E8) | PO item line E (121), although its own valuation type is right |
+| E10 | Existing batch without valuation type in the batch master | PO item line E (132, *Reference* `BATCH`); item and its deliveries / batches not processed |
+| E11 | Two existing batches of one PO item with different valuation types | PO item line E (133, both batches and values); item and its deliveries / batches not processed |
+
+The program does not roll back objects already committed (batch before
+delivery, delivery before PO). After an error, the run can be repeated: the
+objects already aligned are not changed again (D7).
+
+**Online posting scenarios** (D9)
+
+| # | Selection | Result |
+|---|---|---|
+| P1 | Batch line, its delivery line and the PO line | Posted in the order batch → delivery → PO; all green, *Posted* ticked; message 128 |
+| P2 | Batch line only | Batch posted; the delivery and PO lines stay open proposals |
+| P3 | Delivery line only, batch not yet aligned | Delivery line E (124), not posted; can be posted again after the batch |
+| P4 | Delivery line only, batch already aligned (earlier posting or V3) | Delivery item posted |
+| P5 | PO line only, an open delivery item not aligned | PO line E (121), not posted; can be posted again after the delivery |
+| P6 | PO line of scenario 1 | PO item posted |
+| P7 | Lines already posted, or error lines of the simulation (e.g. E1 – E4, E7) | Not postable; if nothing else is selected: message 127 |
+| P8 | Selection containing a line of V12 | Refused as a whole (131), nothing posted |
+| P9 | *No* in the confirmation popup | Nothing posted |
+| P10 | Batch line of an existing batch (134, no status light) | Not selectable: SALV cannot disable single rows, so on *Post* the line is removed from the selection (shown deselected) and never posted; alone: message 127. The delivery line can be posted directly – the batch already has the valuation type |
+| P11 | Lines with 136 (already correct) | Ignored when posting; alone: message 127. SALV cannot block single rows, so they can be selected but are never posted |
+
+Between the proposal and the posting, only the dependencies (batch, open
+delivery items) are read again from the database; the proposal itself is not
+recalculated.
 
 ---
 
@@ -363,7 +475,9 @@ buffers are copies of the BAdI class logic (the class methods are private).
 |---|---|
 | `S_WERKS` | `SELECT-OPTIONS FOR ekpo-werks DEFAULT '8Q01'`, block `B01` with frame |
 | `S_EBELN` | `SELECT-OPTIONS FOR ekpo-ebeln`, block `B01` |
+| `S_VBELN` | `SELECT-OPTIONS FOR likp-vbeln` (`TABLES likp`), block `B01` |
 | `P_GR` | `PARAMETERS AS CHECKBOX`, default off, block `B01` |
+| `P_ALIGN` | `PARAMETERS AS CHECKBOX`, default off, block `B01` |
 | `P_BGD` | Radio button group `MODE`, `USER-COMMAND mode`, block `B02` with frame |
 | `P_ONL` | Radio button group `MODE`, default, block `B02` |
 | `P_TEST` | Checkbox, default `abap_true`, `MODIF ID tst`, block `B02` |
@@ -382,18 +496,23 @@ Events:
 |---|---|
 | `RUN` | Simulation flag, selection, determination, `ALIGN_DELIVERIES`, `UPDATE_PURCHASE_ORDERS`, summaries, `DISPLAY_LOG` |
 | `SELECT_ITEMS` | Open PO items (D1), one SELECT |
-| `SELECT_DELIVERIES` | Open inbound delivery items (`EKES` → `LIPS`/`LIKP`, `VBTYP = '7'`, `WBSTA <> 'C'`; batch split: sub-items only); sets the scenario |
-| `DETERMINE` | Fiscal year, valuation type and checks for one PO item (D2) |
-| `ALIGN_DELIVERIES` / `ALIGN_BATCH` | Scenario 2 per delivery: batches first (buffered per batch), then `CHANGE_DELIVERY` |
+| `FILTER_BY_DELIVERY` | Only if `S_VBELN` is filled: keeps the PO items with an `EKES` line whose delivery is in `S_VBELN` |
+| `SELECT_DELIVERIES` | Open inbound delivery items (`EKES` → `LIPS`/`LIKP`, `VBTYP = '7'`, `WBSTA <> 'C'`; batch split: sub-items only); sets the scenario. |
+| `DETERMINE` | Fiscal year, valuation type and checks for one PO item (D2); with `BWTAR_REF` the batch value instead of the table (D11). Sets the log field `SOURCE` (`TABLE` / `BATCH`) |
+| `READ_BATCHES` | Batch masters of all delivery items (`MCHA`: found, `BWTAR`) and material movements (`MSEG` for material, plant, batch – in S/4HANA read from `MATDOC`) in buffer `MT_BATCH_BUFFER` (fields `FOUND`, `BWTAR`, `USED`) |
+| `SET_BATCH_REFERENCE` | Per PO item: valuation type of its existing batches in `BWTAR_REF` (batch in `REF_CHARG`), or error 132 / 133 in `REF_ERROR` |
+| `IS_BATCH_USED` | Existing batch flag from the buffer (scenario 2.3 on the delivery line) |
+| `ALIGN_DELIVERIES` / `ALIGN_BATCH` | Scenario 2 per delivery: batches first (once per batch – buffer field `DONE`), then `CHANGE_DELIVERY`. Existing batch: no change, info line 134 |
 | `CHANGE_BATCH` | `BAPI_BATCH_CHANGE` (`VAL_TYPE`), commit or rollback |
 | `CHANGE_DELIVERY` | `WS_DELIVERY_UPDATE_2` for all items of one delivery (`VBPOK-BWTAR`, batch passed again), commit; then `LE_DELIVERY_REFRESH_BUFFER` |
 | `BLOCK_ITEM` | Marks the PO item as blocked by a delivery item not aligned (D6) |
+| `LIST_UNCHANGED` | After all changes: for each PO item not in error with at least one line in `MT_LOG`, adds lines 136 (`MSGTY = I`, log field `NOCHANGE`) for the PO item, its open delivery items and their batches that are not in `MT_LOG` and already have the target valuation type (a batch only once over all flows). Not marked `TODO`, so never posted |
 | `UPDATE_PURCHASE_ORDERS` / `CHANGE_PO` | `BAPI_PO_CHANGE` per PO (`VAL_TYPE`, `TESTRUN`, `NO_MESSAGING`), commit or rollback |
 | `GET_FISCAL_YEAR` | `FI_PERIOD_DETERMINE` for the run date, buffered per company code |
 | `GET_VALTYPE_FROM_TABLE` / `READ_VALTYPE` | Lookup order R4, buffered |
 | `VALTYPE_EXISTS` | Valuation record check, buffered |
-| `DISPLAY_LOG` / `BUILD_OUTPUT` / `SET_COLUMN_TEXT` | ALV output (`CL_SALV_TABLE`): output table `MT_OUT` built from the log `MT_LOG` (each line keeps its `MT_LOG` line in the technical column `LOGIDX`), sorted in the program by `EBELN`, object (batch, delivery, PO item – hidden column `RANK`) and `EBELP` and in the ALV by `EBELN` (grouped, with underline) and the hidden column `SEQ` (`EBELP` is no ALV sort column, otherwise repeated item numbers would be suppressed), status light in the exception column `LIGHT` (from `MSGTY`: E/A red, W yellow, S green), cell colours in `T_COLOR` (`COL_TOTAL` yellow, `COL_POSITIVE` green when the change was read back from the database – log field `VERIFIED`, set in `CHANGE_BATCH`, `CHANGE_DELIVERY`, `CHANGE_PO`) |
-| `ON_ADDED_FUNCTION` | Online: handler of function `POST`; posts the selected rows, rebuilds `MT_OUT`, refreshes the ALV |
+| `DISPLAY_LOG` / `BUILD_OUTPUT` / `SET_COLUMN_TEXT` | ALV output (`CL_SALV_TABLE`): output table `MT_OUT` built from the log `MT_LOG` (each line keeps its `MT_LOG` line in the technical column `LOGIDX`), sorted in the program by `EBELN`, object (batch, delivery, PO item – hidden column `RANK`) and `EBELP` and in the ALV by `EBELN` (grouped, with underline) and the hidden column `SEQ` (`EBELP` is no ALV sort column, otherwise repeated item numbers would be suppressed), status light in the exception column `LIGHT` (from `MSGTY`: E/A red, W yellow, S green, I none), cell colours in `T_COLOR` (`COL_TOTAL` yellow, `COL_GROUP` orange – *new* cell of a proposal with `SOURCE = BATCH`, `BAT_BWTAR_OLD` / `BAT_BWTAR_NEW` for message 134 – `COL_POSITIVE` green when the change was read back from the database – log field `VERIFIED`, set in `CHANGE_BATCH`, `CHANGE_DELIVERY`, `CHANGE_PO`) |
+| `ON_ADDED_FUNCTION` | Online: handler of function `POST`; removes batch lines of an existing batch (`BAT_USED`) from the selection (`SET_SELECTED_ROWS`), posts the selected rows, rebuilds `MT_OUT`, refreshes the ALV |
 | `POST_SELECTED` | Online: selected rows with an open proposal (`TODO`), confirmation popup, then `POST_BATCHES`, `POST_DELIVERIES`, `POST_PURCHASE_ORDERS`; marks the rows posted; message 128 |
 | `POST_BATCHES` | `CHANGE_BATCH` per selected batch row |
 | `POST_DELIVERIES` | Per delivery: batch read again from `MCHA` (124 if not aligned), then `CHANGE_DELIVERY` for the selected items |
@@ -457,7 +576,8 @@ failed line gets type E and keeps `TODO`.
    - 101, 102: &1 = old valuation type, &2 = new valuation type
    - 103: &1 = selected, &2 = changed, &3 = already correct, &4 = errors
 
-   Then add messages 117 to 131 with the placeholders of 1.5.
+   Then add messages 117 to 134 and 136 with the placeholders of 1.5 (134
+   and 136 are used as type I; 135 already exists, do not change it).
 10. **Report** – SE38, create executable program `ZPTP_VALTYPE_DOCSALIGN`,
     paste [ZPTP_VALTYPE_DOCSALIGN.abap](ZPTP_VALTYPE_DOCSALIGN.abap).
 11. **GUI status** – SE41 (or SE80): copy status `STANDARD_FULLSCREEN` of
@@ -465,9 +585,9 @@ failed line gets type E and keeps `TODO`.
     `ZSALV_POST`; add function code `POST` (text *Post selected*, with an
     icon) to the application toolbar; activate.
 12. **Text elements** – selection texts: `S_WERKS` Plant, `S_EBELN` Purchase
-    order, `P_GR` Items with goods receipt, `P_BGD` Background, `P_ONL` Online (post row by row), `P_TEST` Test
+    order, `S_VBELN` Inbound delivery, `P_GR` Items with goods receipt, `P_ALIGN` Aligned flows, `P_BGD` Background, `P_ONL` Online (post row by row), `P_TEST` Test
     run. Text symbols: `B01` *Selection*, `B02` *Run mode*, `T05` – `T08`,
-    `T11` – `T40` (ALV headings and confirmation popup): create them from the
+    `T11` – `T46` (ALV headings and confirmation popup): create them from the
     source by double-click. Check syntax and activate.
 13. **Background job** – create a variant (mode *Background*, test run off) and
     schedule it in SM36. Run it first with test run on and check the spool.
@@ -519,6 +639,21 @@ Debugging: breakpoint in `IF_EX_ME_PROCESS_PO_CUST~PROCESS_ITEM`.
 | D-T15 | Real change (background or online) whose valuation type is not on the database after the commit | Line red with message 129; online: can be posted again; background: PO item not changed if a delivery item fails (121) |
 | D-T16 | Option *Items with goods receipt*; PO item fully or partially received | Line yellow (warning 130) with old / determined new valuation type and the GR material document; *Post* with this row selected (alone or with other rows) refused with 131, nothing posted; PO unchanged |
 | D-T17 | Option off; PO item partially received, other valuation type in the table | Item not listed and not changed (nor its deliveries and batches) |
+| D-T18 | As D-T3, batch without any material movement (new batch) | Same result as D-T3 (scenario 2.1, *Reference* `TABLE`) |
+| D-T19 | Delivery item with a batch that has a material movement in the plant (e.g. GR of another PO); batch valuation type differs from the table, test run off | Batch master unchanged (line 134, orange); delivery item (119) and PO item (101) changed to the batch valuation type; scenario 2.3, *Reference* `BATCH` |
+| D-T20 | As D-T19, online mode | Batch line with *Bat VT old* / *new* orange, no status light; selected and *Post*: deselected, not posted; delivery and PO proposals with orange *new* cells; after posting green |
+| D-T21 | As D-T19, delivery item and PO item already have the batch value | Only the batch line 134; nothing changed |
+| D-T22 | PO item with two existing batches with different valuation types | PO item error 133; nothing changed for the item |
+| D-T23 | PO item with an existing and a new batch | New batch changed to the existing batch's valuation type (117), then delivery items and PO item |
+| D-T24 | Existing batch, no table entry for the fiscal year | No error 107; batch value used |
+| D-T25 | PO item already correct, its delivery item different (scenario 2.2) | Delivery item line (119 / 120) and PO item line 136 without light; in background the PO item is not changed; online the 136 line is not posted (127 if selected alone) |
+| D-T26 | Batch already correct, delivery item and PO item different (scenario 2.1) | Batch line 136, delivery item and PO item changed |
+| D-T27 | All objects of the flow already correct | Nothing listed |
+| D-T28 | Batch lines of a new and of an existing batch | Checkbox *Batch with movement* empty for the new batch, ticked for the existing one; empty on delivery and PO lines |
+| D-T29 | Option *Aligned flows*; flow where PO item, delivery item and batch already have the table value | All three listed with 136, no light, no colour; nothing changed (background) or posted (online, 127 if selected alone) |
+| D-T30 | As D-T29, option off | Flow not listed |
+| D-T31 | Inbound delivery range with one delivery of a PO item that has two open deliveries | PO item selected; both deliveries processed and listed |
+| D-T32 | Inbound delivery range, PO item without inbound delivery | Not selected |
 
 ---
 
