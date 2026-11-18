@@ -344,11 +344,17 @@ CLASS lcl_app DEFINITION FINAL.
       IMPORTING iv_vbeln  TYPE vbeln_vl
       CHANGING  ct_change TYPE tt_log.
 
-    "! PO item not changed while one of its deliveries is not aligned
+    "! PO item not changed while one of its deliveries is not aligned.
+    "! The item is changed in the table: the key fields of a line of the
+    "! sorted table are write-protected, so the line itself cannot be
+    "! passed as a CHANGING structure (runtime error
+    "! MOVE_TO_LIT_NOTALLOWED_NODATA)
     METHODS block_item
-      IMPORTING iv_vbeln TYPE vbeln_vl
+      IMPORTING iv_ebeln TYPE ebeln
+                iv_ebelp TYPE ebelp
+                iv_vbeln TYPE vbeln_vl
                 iv_posnr TYPE posnr_vl
-      CHANGING  cs_item  TYPE ty_item.
+      CHANGING  ct_item  TYPE tt_item.
 
     "! Objects already correct in a listed flow (136) - after all changes
     METHODS list_unchanged
@@ -931,9 +937,11 @@ CLASS lcl_app IMPLEMENTATION.
           MESSAGE e124 WITH <ls_member>-charg INTO ls_log-message.
           APPEND ls_log TO mt_log.
           mv_dlv_errors = mv_dlv_errors + 1.
-          block_item( EXPORTING iv_vbeln = <ls_member>-vbeln
+          block_item( EXPORTING iv_ebeln = <ls_item>-ebeln
+                                iv_ebelp = <ls_item>-ebelp
+                                iv_vbeln = <ls_member>-vbeln
                                 iv_posnr = <ls_member>-posnr
-                      CHANGING  cs_item  = <ls_item> ).
+                      CHANGING  ct_item  = ct_item ).
           CONTINUE.
         ENDIF.
 
@@ -948,12 +956,11 @@ CLASS lcl_app IMPLEMENTATION.
                          CHANGING  ct_change = lt_change ).
         LOOP AT lt_change ASSIGNING FIELD-SYMBOL(<ls_change>)
              WHERE msgty = 'E'.
-          READ TABLE ct_item ASSIGNING <ls_item>
-               WITH TABLE KEY ebeln = <ls_change>-ebeln
-                              ebelp = <ls_change>-ebelp.
-          block_item( EXPORTING iv_vbeln = <ls_change>-vbeln
+          block_item( EXPORTING iv_ebeln = <ls_change>-ebeln
+                                iv_ebelp = <ls_change>-ebelp
+                                iv_vbeln = <ls_change>-vbeln
                                 iv_posnr = <ls_change>-posnr
-                      CHANGING  cs_item  = <ls_item> ).
+                      CHANGING  ct_item  = ct_item ).
         ENDLOOP.
         APPEND LINES OF lt_change TO mt_log.
       ENDIF.
@@ -1217,9 +1224,13 @@ CLASS lcl_app IMPLEMENTATION.
 
   METHOD block_item.
 
-    IF cs_item-blocked_vbeln IS INITIAL.
-      cs_item-blocked_vbeln = iv_vbeln.
-      cs_item-blocked_posnr = iv_posnr.
+    " Only the non-key fields of the line are changed
+    READ TABLE ct_item ASSIGNING FIELD-SYMBOL(<ls_item>)
+         WITH TABLE KEY ebeln = iv_ebeln
+                        ebelp = iv_ebelp.
+    IF sy-subrc = 0 AND <ls_item>-blocked_vbeln IS INITIAL.
+      <ls_item>-blocked_vbeln = iv_vbeln.
+      <ls_item>-blocked_posnr = iv_posnr.
     ENDIF.
 
   ENDMETHOD.

@@ -1,0 +1,55 @@
+Short dump ZPTP_VALTYPE_DOCSALIGN - 17.11.2026 17:45 (SEQ/390, tx ZPTP_VALTYPE_ALIGN)
+=================================================================================
+
+Runtime error : MOVE_TO_LIT_NOTALLOWED_NODATA
+Exception     : CX_SY_DYN_CALL_ILLEGAL_TYPE
+Location      : LCL_APP=>ALIGN_DELIVERIES, line 954 (call of BLOCK_ITEM)
+
+ROOT CAUSE
+----------
+CT_ITEM is a SORTED table with UNIQUE KEY EBELN EBELP. A field symbol
+assigned to one of its lines (READ TABLE ... ASSIGNING <LS_ITEM>) has
+write-protected key fields. The line was passed to BLOCK_ITEM as
+CHANGING CS_ITEM TYPE TY_ITEM. Passing a partly write-protected
+structure to a CHANGING parameter is rejected at runtime, so the program
+dumped.
+
+The call is reached only on the error path (a delivery or batch change
+failed), so normal runs never executed it. Both calls were affected:
+- line 954: delivery change not confirmed after WS_DELIVERY_UPDATE_2
+  (this dump)
+- line 936: batch alignment failed (same dump, not yet seen)
+
+Trigger in this run: delivery 0180107336 / 000010 (PO 4500058933 / 00010,
+material 30-08437). WS_DELIVERY_UPDATE_2 returned no error, but the
+read-back of LIPS found FY26 RM instead of FY27 RM (message 129).
+
+FIX
+---
+- BLOCK_ITEM now receives the table (CHANGING CT_ITEM TYPE TT_ITEM) and
+  the PO item key (IV_EBELN, IV_EBELP). It reads the line itself and
+  changes only the non-key fields BLOCKED_VBELN and BLOCKED_POSNR.
+- Both calls in ALIGN_DELIVERIES were adapted.
+- The READ TABLE before the second call, which had no SY-SUBRC check,
+  was removed. The lookup inside BLOCK_ITEM checks SY-SUBRC.
+
+Effect: an unconfirmed delivery or batch change is logged as an error
+and blocks its PO item, as designed, instead of ending the run.
+
+OPEN POINT (not part of this fix)
+---------------------------------
+Why the delivery change was not saved. The delivery BAdI
+ZCL_IM_LE_SHP_DELIVERY_PROC (SAVE_DOCUMENT_PREPARE) re-determines LIPS-BWTAR
+with the fiscal year of the delivery date (LIKP-LFDAT). The alignment
+program uses the fiscal year of the run date. If the delivery date of
+0180107336 is in the earlier fiscal year, the BAdI sets FY26 RM back on
+save. Check LIKP-LFDAT of 0180107336.
+Deliveries 0180107337, 0180107338 and 0180107344 are likely affected the
+same way.
+
+STATE AFTER THE ABORTED RUN
+---------------------------
+The run stopped before the PO update step: no PO item was changed.
+Batches and deliveries processed before the abort keep their changes.
+A rerun after transport of the fix is safe; already aligned objects are
+listed as unchanged.
