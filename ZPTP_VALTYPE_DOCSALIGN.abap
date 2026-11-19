@@ -29,11 +29,24 @@
 *   Delivery item (LIPS-BWTAR) changed with WS_DELIVERY_UPDATE_2, one
 *   call per delivery. Then the PO item, only if all its open delivery
 *   items are aligned - so it gets the valuation type of its deliveries.
+* Batch on the PO item (schedule lines, EKET-CHARG): handled like a
+*   batch of a delivery item. Existing batch: its valuation type is the
+*   reference of the PO item (as 2.3, also errors 132 / 133). New batch:
+*   the batch master is changed before the PO item (as 2.1); if it is
+*   not aligned, the PO item is not changed (141). Scenario of the batch
+*   line: 1.1 / 1.3 (item without inbound delivery), 2.1 / 2.3 (with).
+*   A batch also on a delivery item is processed and listed once, with
+*   the delivery item. The PO item line shows its batch (empty if its
+*   schedule lines carry several batches).
 * PO items: BAPI_PO_CHANGE, one call per PO, without output
-* determination (NO_MESSAGING).
-* Flow = PO item, its open delivery items and their batches. When one
-*   object of a flow is listed, the objects of the flow already correct
-*   are listed too (136, no light) - never changed, never posted.
+* determination (NO_MESSAGING). Test run / online proposal: a PO item
+* whose batch master would be changed first is simulated without the
+* BAPI - in a simulation the batch keeps its old valuation type, which
+* the BAPI may check against the PO item.
+* Flow = PO item, its batches, its open delivery items and their
+*   batches. When one object of a flow is listed, the objects of the
+*   flow already correct are listed too (136, no light) - never
+*   changed, never posted.
 *   Option P_ALIGN: flows already aligned are listed as well (136).
 * Items with a goods receipt (partially or fully received) are never
 *   changed, nor their deliveries and batches. Option P_GR lists them
@@ -52,13 +65,15 @@
 *     changes. The user selects rows and posts them with function POST
 *     (GUI status ZSALV_POST); per selection batches first, then
 *     deliveries, then PO items. A delivery item needs its batch, a PO
-*     item all its open delivery items with the new valuation type.
+*     item its batches and all its open delivery items with the new
+*     valuation type.
 *     Failed rows can be posted again. Not possible in background.
 * PO not released (release strategy, EKKO-FRGRL): processed as any other
 *   PO; one warning line (139) per listed PO, at the top of its lines.
 * S/4HANA: goods movement status in LIPS-WBSTA (ECC: VBUP-WBSTA).
 * Messages: class ZPTP_SPLIT_VAL, 100 - 104, 106, 107, 117 - 134, 136,
-*   139 (135, 140 reserved; 137, 138 used by ZPTP_PROD_BATCH_VALTYPE).
+*   139, 141 (135, 140 reserved; 137, 138 used by
+*   ZPTP_PROD_BATCH_VALTYPE).
 *---------------------------------------------------------------------*
 REPORT zptp_valtype_docsalign MESSAGE-ID zptp_split_val.
 
@@ -112,13 +127,27 @@ CLASS lcl_app DEFINITION FINAL.
         failed        TYPE abap_bool,   " determination error, logged
         blocked_vbeln TYPE vbeln_vl,    " first delivery not aligned
         blocked_posnr TYPE posnr_vl,
+        blocked_charg TYPE charg_d,     " batch of the PO item not aligned
         gr_only       TYPE abap_bool,   " P_GR: goods receipt, listed only
         bwtar_ref     TYPE bwtar_d,     " valuation type of existing batch
         ref_charg     TYPE charg_d,     " batch giving BWTAR_REF
         ref_error     TYPE bapi_msg,    " existing batches inconsistent
         source        TYPE ty_source,   " origin of BWTAR_NEW
+        po_charg      TYPE charg_d,     " batch of the schedule lines (one)
+        bat_pending   TYPE abap_bool,   " simulation: its batch not changed
       END OF ty_item,
       tt_item TYPE SORTED TABLE OF ty_item WITH UNIQUE KEY ebeln ebelp,
+
+      " Batch entered on the PO item (schedule lines, EKET-CHARG)
+      BEGIN OF ty_po_batch,
+        ebeln TYPE ebeln,
+        ebelp TYPE ebelp,
+        matnr TYPE matnr,
+        werks TYPE werks_d,
+        charg TYPE charg_d,
+      END OF ty_po_batch,
+      tt_po_batch TYPE SORTED TABLE OF ty_po_batch
+                  WITH UNIQUE KEY ebeln ebelp charg,
 
       BEGIN OF ty_dlv,
         vbeln TYPE vbeln_vl,
@@ -242,6 +271,8 @@ CLASS lcl_app DEFINITION FINAL.
     CONSTANTS:
       BEGIN OF c_scen,
         po       TYPE ty_scen VALUE '1',
+        po_batch TYPE ty_scen VALUE '1.1',  " new batch on the PO item
+        po_used  TYPE ty_scen VALUE '1.3',  " existing batch on the PO item
         delivery TYPE ty_scen VALUE '2',
         batch    TYPE ty_scen VALUE '2.1',
         no_batch TYPE ty_scen VALUE '2.2',
@@ -311,19 +342,34 @@ CLASS lcl_app DEFINITION FINAL.
       EXPORTING et_dlv  TYPE tt_dlv
       CHANGING  ct_item TYPE tt_item.
 
-    "! Batch masters of the delivery items and their material movements
+    "! Batches entered on the PO items (EKET-CHARG), one line per batch
+    "! and item; sets the batch shown on the PO item line (PO_CHARG)
+    METHODS select_po_batches
+      EXPORTING et_po_batch TYPE tt_po_batch
+      CHANGING  ct_item     TYPE tt_item.
+
+    "! Batch masters of the delivery items and of the PO items and their
+    "! material movements
     METHODS read_batches
-      IMPORTING it_dlv TYPE tt_dlv.
+      IMPORTING it_dlv      TYPE tt_dlv
+                it_po_batch TYPE tt_po_batch.
 
     "! Valuation type of existing batches as reference of the PO item
     METHODS set_batch_reference
-      IMPORTING it_dlv  TYPE tt_dlv
-      CHANGING  ct_item TYPE tt_item.
+      IMPORTING it_dlv      TYPE tt_dlv
+                it_po_batch TYPE tt_po_batch
+      CHANGING  ct_item     TYPE tt_item.
 
     "! Batch with a material movement in the plant (see READ_BATCHES)
     METHODS is_batch_used
       IMPORTING is_dlv         TYPE ty_dlv
       RETURNING VALUE(rv_used) TYPE abap_bool.
+
+    "! Scenario of a batch line: x.1 new batch, x.3 existing batch
+    METHODS batch_scenario
+      IMPORTING iv_item_scen   TYPE ty_scen
+                iv_used        TYPE abap_bool
+      RETURNING VALUE(rv_scen) TYPE ty_scen.
 
     "! Log line with the new valuation type, or MSGTY = E on error
     METHODS determine
@@ -341,6 +387,12 @@ CLASS lcl_app DEFINITION FINAL.
                 is_item      TYPE ty_item
       RETURNING VALUE(rv_ok) TYPE abap_bool.
 
+    "! Batches of the PO items not aligned with a delivery item, before
+    "! the PO items; a batch not aligned blocks its PO item (141)
+    METHODS align_po_batches
+      IMPORTING it_po_batch TYPE tt_po_batch
+      CHANGING  ct_item     TYPE tt_item.
+
     METHODS change_batch
       CHANGING cs_log TYPE ty_log.
 
@@ -349,7 +401,9 @@ CLASS lcl_app DEFINITION FINAL.
       IMPORTING iv_vbeln  TYPE vbeln_vl
       CHANGING  ct_change TYPE tt_log.
 
-    "! PO item not changed while one of its deliveries is not aligned.
+    "! PO item not changed while one of its deliveries (IV_VBELN,
+    "! IV_POSNR) or one of its batches (IV_CHARG) is not aligned; the
+    "! first one is kept.
     "! The item is changed in the table: the key fields of a line of the
     "! sorted table are write-protected, so the line itself cannot be
     "! passed as a CHANGING structure (runtime error
@@ -357,14 +411,16 @@ CLASS lcl_app DEFINITION FINAL.
     METHODS block_item
       IMPORTING iv_ebeln TYPE ebeln
                 iv_ebelp TYPE ebelp
-                iv_vbeln TYPE vbeln_vl
-                iv_posnr TYPE posnr_vl
+                iv_vbeln TYPE vbeln_vl OPTIONAL
+                iv_posnr TYPE posnr_vl OPTIONAL
+                iv_charg TYPE charg_d  OPTIONAL
       CHANGING  ct_item  TYPE tt_item.
 
     "! Objects already correct in a listed flow (136) - after all changes
     METHODS list_unchanged
-      IMPORTING it_dlv  TYPE tt_dlv
-                it_item TYPE tt_item.
+      IMPORTING it_dlv      TYPE tt_dlv
+                it_po_batch TYPE tt_po_batch
+                it_item     TYPE tt_item.
 
     "! Warning line (139) per listed PO not released - display only
     METHODS list_unreleased_pos.
@@ -422,7 +478,8 @@ CLASS lcl_app DEFINITION FINAL.
     METHODS post_deliveries
       CHANGING ct_post TYPE tt_log.
 
-    "! PO items with deliveries only if all open items are aligned
+    "! PO items only if their batches and all their open delivery items
+    "! are aligned
     METHODS post_purchase_orders
       CHANGING ct_post TYPE tt_log.
 
@@ -470,10 +527,15 @@ CLASS lcl_app IMPLEMENTATION.
     select_deliveries( IMPORTING et_dlv  = DATA(lt_dlv)
                        CHANGING  ct_item = lt_item ).
 
+    select_po_batches( IMPORTING et_po_batch = DATA(lt_po_batch)
+                       CHANGING  ct_item     = lt_item ).
+
     " Existing batches give the valuation type instead of the table
-    read_batches( lt_dlv ).
-    set_batch_reference( EXPORTING it_dlv  = lt_dlv
-                         CHANGING  ct_item = lt_item ).
+    read_batches( it_dlv      = lt_dlv
+                  it_po_batch = lt_po_batch ).
+    set_batch_reference( EXPORTING it_dlv      = lt_dlv
+                                   it_po_batch = lt_po_batch
+                         CHANGING  ct_item     = lt_item ).
 
     LOOP AT lt_item ASSIGNING FIELD-SYMBOL(<ls_item>).
       DATA(ls_log) = determine( <ls_item> ).
@@ -491,11 +553,16 @@ CLASS lcl_app IMPLEMENTATION.
     align_deliveries( EXPORTING it_dlv  = lt_dlv
                       CHANGING  ct_item = lt_item ).
 
+    " Batches of the PO items - those also on a delivery item are done
+    align_po_batches( EXPORTING it_po_batch = lt_po_batch
+                      CHANGING  ct_item     = lt_item ).
+
     update_purchase_orders( lt_item ).
 
     " Display only - added after processing, so never changed
-    list_unchanged( it_dlv  = lt_dlv
-                    it_item = lt_item ).
+    list_unchanged( it_dlv      = lt_dlv
+                    it_po_batch = lt_po_batch
+                    it_item     = lt_item ).
 
     " Display only - after all lines, so every listed PO is checked
     list_unreleased_pos( ).
@@ -743,6 +810,53 @@ CLASS lcl_app IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD select_po_batches.
+
+    DATA lv_count TYPE i.
+
+    CLEAR et_po_batch.
+
+    IF ct_item IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    " Batch entered on the PO item (ME21N / ME22N): on its schedule lines
+    SELECT ebeln, ebelp, charg
+      FROM eket
+      FOR ALL ENTRIES IN @ct_item
+      WHERE ebeln =  @ct_item-ebeln
+        AND ebelp =  @ct_item-ebelp
+        AND charg <> @space
+      INTO TABLE @DATA(lt_eket).
+
+    LOOP AT lt_eket INTO DATA(ls_eket).
+      READ TABLE ct_item INTO DATA(ls_item)
+           WITH TABLE KEY ebeln = ls_eket-ebeln
+                          ebelp = ls_eket-ebelp.
+      INSERT VALUE #( ebeln = ls_eket-ebeln
+                      ebelp = ls_eket-ebelp
+                      matnr = ls_item-matnr
+                      werks = ls_item-werks
+                      charg = ls_eket-charg )
+             INTO TABLE et_po_batch.          " duplicates ignored
+    ENDLOOP.
+
+    " Batch column of the PO item line: empty if the schedule lines carry
+    " several batches - each of them has its own batch line
+    LOOP AT ct_item ASSIGNING FIELD-SYMBOL(<ls_item>).
+      CLEAR lv_count.
+      LOOP AT et_po_batch INTO DATA(ls_po_batch)
+           WHERE ebeln = <ls_item>-ebeln
+             AND ebelp = <ls_item>-ebelp.
+        lv_count = lv_count + 1.
+      ENDLOOP.
+      <ls_item>-po_charg = COND #( WHEN lv_count = 1
+                                   THEN ls_po_batch-charg ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
   METHOD read_batches.
 
     CLEAR mt_batch_buffer.
@@ -751,6 +865,13 @@ CLASS lcl_app IMPLEMENTATION.
       INSERT VALUE #( matnr = ls_dlv-matnr
                       werks = ls_dlv-werks
                       charg = ls_dlv-charg )
+             INTO TABLE mt_batch_buffer.        " duplicates ignored
+    ENDLOOP.
+
+    LOOP AT it_po_batch INTO DATA(ls_po_batch).
+      INSERT VALUE #( matnr = ls_po_batch-matnr
+                      werks = ls_po_batch-werks
+                      charg = ls_po_batch-charg )
              INTO TABLE mt_batch_buffer.        " duplicates ignored
     ENDLOOP.
 
@@ -796,13 +917,20 @@ CLASS lcl_app IMPLEMENTATION.
 
   METHOD set_batch_reference.
 
+    DATA lt_use TYPE STANDARD TABLE OF ty_po_batch WITH EMPTY KEY.
+
+    " Batches of the delivery items and of the PO items (schedule lines)
+    lt_use = VALUE #( FOR ls_dlv IN it_dlv WHERE ( charg IS NOT INITIAL )
+                      ( CORRESPONDING #( ls_dlv ) ) ).
+    APPEND LINES OF it_po_batch TO lt_use.
+
     " One valuation type per PO item: the one of its existing batches
-    LOOP AT it_dlv INTO DATA(ls_dlv) WHERE charg IS NOT INITIAL.
+    LOOP AT lt_use INTO DATA(ls_use).
 
       READ TABLE mt_batch_buffer INTO DATA(ls_batch)
-           WITH TABLE KEY matnr = ls_dlv-matnr
-                          werks = ls_dlv-werks
-                          charg = ls_dlv-charg.
+           WITH TABLE KEY matnr = ls_use-matnr
+                          werks = ls_use-werks
+                          charg = ls_use-charg.
       " New batch, or batch not found (error 122 in ALIGN_BATCH)
       IF sy-subrc <> 0 OR ls_batch-used = abap_false
       OR ls_batch-found = abap_false.
@@ -810,8 +938,8 @@ CLASS lcl_app IMPLEMENTATION.
       ENDIF.
 
       READ TABLE ct_item ASSIGNING FIELD-SYMBOL(<ls_item>)
-           WITH TABLE KEY ebeln = ls_dlv-ebeln
-                          ebelp = ls_dlv-ebelp.
+           WITH TABLE KEY ebeln = ls_use-ebeln
+                          ebelp = ls_use-ebelp.
       IF sy-subrc <> 0 OR <ls_item>-ref_error IS NOT INITIAL.
         CONTINUE.
       ENDIF.
@@ -842,6 +970,22 @@ CLASS lcl_app IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD batch_scenario.
+
+    " Scenario 1: batch on a PO item without inbound delivery
+    IF iv_item_scen = c_scen-po.
+      rv_scen = COND #( WHEN iv_used = abap_true
+                        THEN c_scen-po_used
+                        ELSE c_scen-po_batch ).
+    ELSE.
+      rv_scen = COND #( WHEN iv_used = abap_true
+                        THEN c_scen-used
+                        ELSE c_scen-batch ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
   METHOD determine.
 
     rs_log = VALUE #( scen      = is_item-scen
@@ -850,6 +994,7 @@ CLASS lcl_app IMPLEMENTATION.
                       ebelp     = is_item-ebelp
                       werks     = is_item-werks
                       matnr     = is_item-matnr
+                      charg     = is_item-po_charg
                       mtart     = is_item-mtart
                       bwtar_old = is_item-bwtar
                       source    = c_source-table ).
@@ -983,7 +1128,8 @@ CLASS lcl_app IMPLEMENTATION.
 
   METHOD align_batch.
 
-    " A batch on several delivery items is checked and changed once
+    " A batch on several delivery items (or on a delivery item and the PO
+    " item) is checked and changed once
     READ TABLE mt_batch_buffer ASSIGNING FIELD-SYMBOL(<ls_buf>)
          WITH TABLE KEY matnr = is_dlv-matnr
                         werks = is_dlv-werks
@@ -1000,11 +1146,9 @@ CLASS lcl_app IMPLEMENTATION.
 
     <ls_buf>-done = abap_true.
 
-    DATA(lv_scen) = COND ty_scen( WHEN <ls_buf>-used = abap_true
-                                  THEN c_scen-used
-                                  ELSE c_scen-batch ).
-
-    DATA(ls_log) = VALUE ty_log( scen      = lv_scen
+    DATA(ls_log) = VALUE ty_log( scen      = batch_scenario(
+                                               iv_item_scen = is_item-scen
+                                               iv_used      = <ls_buf>-used )
                                  object    = c_object-batch
                                  ebeln     = is_item-ebeln
                                  ebelp     = is_item-ebelp
@@ -1063,6 +1207,45 @@ CLASS lcl_app IMPLEMENTATION.
     IF rv_ok = abap_true.
       mv_batch_changed = mv_batch_changed + 1.
     ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD align_po_batches.
+
+    " Same as a batch of a delivery item (ALIGN_BATCH): checked and
+    " changed once - a batch also on a delivery item is already done
+    LOOP AT it_po_batch INTO DATA(ls_po_batch).
+
+      " Batches of PO items in error are not processed
+      READ TABLE ct_item ASSIGNING FIELD-SYMBOL(<ls_item>)
+           WITH TABLE KEY ebeln = ls_po_batch-ebeln
+                          ebelp = ls_po_batch-ebelp.
+      IF sy-subrc <> 0 OR <ls_item>-failed = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      IF align_batch( is_dlv  = CORRESPONDING #( ls_po_batch )
+                      is_item = <ls_item> ) = abap_false.
+        block_item( EXPORTING iv_ebeln = <ls_item>-ebeln
+                              iv_ebelp = <ls_item>-ebelp
+                              iv_charg = ls_po_batch-charg
+                    CHANGING  ct_item  = ct_item ).
+        CONTINUE.
+      ENDIF.
+
+      " Simulation: the batch master keeps its old valuation type, so
+      " the PO item is not simulated with BAPI_PO_CHANGE
+      DATA(lv_bwtar) = VALUE bwtar_d(
+                         mt_batch_buffer[ matnr = ls_po_batch-matnr
+                                          werks = ls_po_batch-werks
+                                          charg = ls_po_batch-charg ]-bwtar
+                         OPTIONAL ).
+      IF mv_test = abap_true AND lv_bwtar <> <ls_item>-bwtar_new.
+        <ls_item>-bat_pending = abap_true.
+      ENDIF.
+
+    ENDLOOP.
 
   ENDMETHOD.
 
@@ -1239,9 +1422,12 @@ CLASS lcl_app IMPLEMENTATION.
     READ TABLE ct_item ASSIGNING FIELD-SYMBOL(<ls_item>)
          WITH TABLE KEY ebeln = iv_ebeln
                         ebelp = iv_ebelp.
-    IF sy-subrc = 0 AND <ls_item>-blocked_vbeln IS INITIAL.
+    IF  sy-subrc = 0
+    AND <ls_item>-blocked_vbeln IS INITIAL
+    AND <ls_item>-blocked_charg IS INITIAL.
       <ls_item>-blocked_vbeln = iv_vbeln.
       <ls_item>-blocked_posnr = iv_posnr.
+      <ls_item>-blocked_charg = iv_charg.
     ENDIF.
 
   ENDMETHOD.
@@ -1279,6 +1465,7 @@ CLASS lcl_app IMPLEMENTATION.
         DATA(ls_add) = ls_base.
         ls_add-scen      = ls_item-scen.
         ls_add-object    = c_object-po_item.
+        ls_add-charg     = ls_item-po_charg.
         ls_add-bwtar_old = ls_item-bwtar.
         ls_add-bwtar_new = ls_item-bwtar.
         MESSAGE i136 WITH ls_add-bwtar_old INTO ls_add-message.
@@ -1346,6 +1533,40 @@ CLASS lcl_app IMPLEMENTATION.
 
       ENDLOOP.
 
+      " Batches of the PO item - after the deliveries, so that a batch
+      " also on a delivery item is listed with its delivery
+      LOOP AT it_po_batch INTO DATA(ls_po_batch)
+           WHERE ebeln = ls_item-ebeln
+             AND ebelp = ls_item-ebelp.
+        IF line_exists( mt_log[ object = c_object-batch
+                                matnr  = ls_po_batch-matnr
+                                werks  = ls_po_batch-werks
+                                charg  = ls_po_batch-charg ] )
+        OR line_exists( lt_add[ object = c_object-batch
+                                matnr  = ls_po_batch-matnr
+                                werks  = ls_po_batch-werks
+                                charg  = ls_po_batch-charg ] ).
+          CONTINUE.
+        ENDIF.
+        lv_bwtar = VALUE #( mt_batch_buffer[ matnr = ls_po_batch-matnr
+                                             werks = ls_po_batch-werks
+                                             charg = ls_po_batch-charg ]-bwtar
+                            OPTIONAL ).
+        IF lv_bwtar = ls_item-bwtar_new.
+          ls_add = ls_base.
+          ls_add-scen      = batch_scenario(
+                               iv_item_scen = ls_item-scen
+                               iv_used      = is_batch_used(
+                                                CORRESPONDING #( ls_po_batch ) ) ).
+          ls_add-object    = c_object-batch.
+          ls_add-charg     = ls_po_batch-charg.
+          ls_add-bwtar_old = lv_bwtar.
+          ls_add-bwtar_new = lv_bwtar.
+          MESSAGE i136 WITH lv_bwtar INTO ls_add-message.
+          APPEND ls_add TO lt_add.
+        ENDIF.
+      ENDLOOP.
+
     ENDLOOP.
 
     APPEND LINES OF lt_add TO mt_log.
@@ -1408,6 +1629,7 @@ CLASS lcl_app IMPLEMENTATION.
                                      ebelp     = <ls_member>-ebelp
                                      werks     = <ls_member>-werks
                                      matnr     = <ls_member>-matnr
+                                     charg     = <ls_member>-po_charg
                                      mtart     = <ls_member>-mtart
                                      gjahr     = <ls_member>-gjahr
                                      bwtar_old = <ls_member>-bwtar
@@ -1423,8 +1645,22 @@ CLASS lcl_app IMPLEMENTATION.
                   INTO ls_log-message.
           mv_errors = mv_errors + 1.
           APPEND ls_log TO mt_log.
+        ELSEIF <ls_member>-blocked_charg IS NOT INITIAL.
+          ls_log-msgty = 'E'.
+          ls_log-charg = <ls_member>-blocked_charg.
+          MESSAGE e141 WITH <ls_member>-blocked_charg INTO ls_log-message.
+          mv_errors = mv_errors + 1.
+          APPEND ls_log TO mt_log.
         ELSEIF ls_log-bwtar_new = ls_log-bwtar_old.
           mv_unchanged = mv_unchanged + 1.   " nothing to do, not logged
+        ELSEIF <ls_member>-bat_pending = abap_true.
+          " Simulation only (ALIGN_PO_BATCHES): the BAPI might refuse the
+          " item against the old valuation type of its batch master
+          ls_log-msgty = 'S'.
+          MESSAGE s102 WITH ls_log-bwtar_old ls_log-bwtar_new
+                  INTO ls_log-message.
+          mv_changed = mv_changed + 1.
+          APPEND ls_log TO mt_log.
         ELSE.
           APPEND ls_log TO lt_change.
         ENDIF.
@@ -2013,9 +2249,13 @@ CLASS lcl_app IMPLEMENTATION.
 
   METHOD post_purchase_orders.
 
-    DATA lt_item   TYPE tt_item.
-    DATA lt_dlv    TYPE tt_dlv.
-    DATA lt_change TYPE tt_log.
+    DATA lt_item     TYPE tt_item.
+    DATA lt_dlv      TYPE tt_dlv.
+    DATA lt_po_item  TYPE tt_item.
+    DATA lt_po_batch TYPE tt_po_batch.
+    DATA lt_change   TYPE tt_log.
+    DATA lv_charg    TYPE charg_d.
+    DATA lv_bwtar    TYPE bwtar_d.
 
     " Open delivery items read again - may have been posted just now
     LOOP AT ct_post INTO DATA(ls_post)
@@ -2027,6 +2267,27 @@ CLASS lcl_app IMPLEMENTATION.
     IF lt_item IS NOT INITIAL.
       select_deliveries( IMPORTING et_dlv  = lt_dlv
                          CHANGING  ct_item = lt_item ).
+    ENDIF.
+
+    " Batches of the PO items and their batch masters read again - may
+    " have been posted just now
+    LOOP AT ct_post INTO ls_post WHERE object = c_object-po_item.
+      INSERT VALUE #( ebeln = ls_post-ebeln
+                      ebelp = ls_post-ebelp
+                      matnr = ls_post-matnr
+                      werks = ls_post-werks )
+             INTO TABLE lt_po_item.
+    ENDLOOP.
+    select_po_batches( IMPORTING et_po_batch = lt_po_batch
+                       CHANGING  ct_item     = lt_po_item ).
+    IF lt_po_batch IS NOT INITIAL.
+      SELECT matnr, werks, charg, bwtar
+        FROM mcha
+        FOR ALL ENTRIES IN @lt_po_batch
+        WHERE matnr = @lt_po_batch-matnr
+          AND werks = @lt_po_batch-werks
+          AND charg = @lt_po_batch-charg
+        INTO TABLE @DATA(lt_mcha).
     ENDIF.
 
     LOOP AT ct_post ASSIGNING FIELD-SYMBOL(<ls_post>)
@@ -2051,6 +2312,30 @@ CLASS lcl_app IMPLEMENTATION.
           CONTINUE.
         ENDIF.
         CLEAR: <ls_member>-vbeln, <ls_member>-posnr.
+
+        " Batch of the PO item without the new valuation type
+        CLEAR lv_charg.
+        LOOP AT lt_po_batch INTO DATA(ls_po_batch)
+             WHERE ebeln = <ls_member>-ebeln
+               AND ebelp = <ls_member>-ebelp.
+          lv_bwtar = VALUE #( lt_mcha[ matnr = ls_po_batch-matnr
+                                       werks = ls_po_batch-werks
+                                       charg = ls_po_batch-charg ]-bwtar
+                              OPTIONAL ).
+          IF lv_bwtar <> <ls_member>-bwtar_new.
+            lv_charg = ls_po_batch-charg.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+        IF lv_charg IS NOT INITIAL.
+          <ls_member>-msgty = 'E'.
+          <ls_member>-charg = lv_charg.
+          MESSAGE e141 WITH lv_charg INTO <ls_member>-message.
+          CONTINUE.
+        ENDIF.
+        <ls_member>-charg = lt_po_item[ ebeln = <ls_member>-ebeln
+                                        ebelp = <ls_member>-ebelp ]-po_charg.
+
         APPEND <ls_member> TO lt_change.
       ENDLOOP.
 

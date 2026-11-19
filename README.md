@@ -5,8 +5,8 @@ Implementation of BAdI `ME_PROCESS_PO_CUST` that fills the valuation type
 custom table `ZPTP_301_VALTYPE`.
 
 Report `ZPTP_VALTYPE_DOCSALIGN` aligns the valuation type of open PO items, of
-their open inbound deliveries and of the batches on these deliveries with the
-same table, for the fiscal year of the run date. Two run modes:
+their open inbound deliveries and of the batches on these PO items and
+deliveries with the same table, for the fiscal year of the run date. Two run modes:
 *Background* (all changes in one run, also as a background job, with test
 run) and *Online* (proposals in an ALV; the user selects rows and posts them
 individually).

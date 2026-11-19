@@ -8,8 +8,8 @@
 | Customizing table | `ZPTP_301_VALTYPE` |
 | Message class | `ZPTP_SPLIT_VAL` (numbers 100 and above) |
 | Author | kas68 |
-| Version | 1.1 |
-| Date | 2026-11-18 |
+| Version | 1.2 |
+| Date | 2026-11-19 |
 | Related document | [SPECIFICATION.md](SPECIFICATION.md) – full functional and technical specification, setup and transport |
 
 ---
@@ -31,7 +31,7 @@ The solution has two parts:
 | Part | Object | What it does |
 |---|---|---|
 | A | BAdI implementation `ZCL_IM_MM_PO_SPLIT_VAL` | Sets the valuation type on purchase order items when a buyer creates or changes the PO. |
-| B | Report `ZPTP_VALTYPE_DOCSALIGN` | Corrects the valuation type of **existing** open PO items, of their open inbound deliveries and of the batches on these deliveries. For example, at the start of a new fiscal year, before the goods receipt. |
+| B | Report `ZPTP_VALTYPE_DOCSALIGN` | Corrects the valuation type of **existing** open PO items, of their open inbound deliveries and of the batches on these PO items and deliveries. For example, at the start of a new fiscal year, before the goods receipt. |
 
 ---
 
@@ -43,7 +43,7 @@ The solution has two parts:
   order BAPIs (`BAPI_PO_CREATE1`, `BAPI_PO_CHANGE`).
 - Materials that are split-valuated in the valuation area of the plant.
 - Bulk alignment of open PO items, their open inbound delivery items and the
-  batches on these deliveries (report).
+  batches on these PO items and deliveries (report).
 
 **Out of scope**
 
@@ -184,12 +184,13 @@ transport.
 
 The BAdI only acts when a PO is entered or changed. Documents created before
 the go-live, or before a new year's table lines existed, may carry an old
-valuation type. The same applies to the inbound deliveries and batches
-created from them.
+valuation type. The same applies to the batches entered on them and to the
+inbound deliveries and batches created from them.
 
 The report brings these documents in line with the table, for the **fiscal
 year of the run date**. It handles the whole document flow of a PO item:
-**PO item → open inbound delivery items → batches on these delivery items**.
+**PO item (and the batch entered on it) → open inbound delivery items →
+batches on these delivery items**.
 
 Typical use: at the start of a new fiscal year, before the first goods
 receipts of the year, or after a table correction.
@@ -232,7 +233,7 @@ A PO item is processed when **all** of these apply:
 |---|---|
 | D1 | The year is the **fiscal year of the run date** in the company code of the PO item. This is not the PO date, unlike the BAdI. If it cannot be determined: error 100. |
 | D2 | The valuation type is read from `ZPTP_301_VALTYPE` in the order of 3.1. No entry: error 107. |
-| D3 | **Existing batch takes priority.** If a delivery item of the PO item carries a batch that already has material movements in the plant (an *existing batch*), the batch's valuation type is used instead of the table value. The table is not read, so errors 100 and 107 do not apply. A batch with stock can't be revalued, so the PO and delivery must follow the batch. |
+| D3 | **Existing batch takes priority.** If the PO item or one of its delivery items carries a batch that already has material movements in the plant (an *existing batch*), the batch's valuation type is used instead of the table value. The table is not read, so errors 100 and 107 do not apply. A batch with stock can't be revalued, so the PO and delivery must follow the batch. |
 | D4 | The target value must have its own valuation record for the material (not flagged for deletion). Otherwise: error 106. |
 | D5 | A PO item in error (100, 106, 107, 132, 133) is not processed, and neither are its deliveries and batches. |
 
@@ -240,10 +241,20 @@ A PO item is processed when **all** of these apply:
 
 | Scenario | Starting situation | What the report changes, in this order |
 |---|---|---|
-| **1** | Open PO item, no inbound delivery | PO item |
+| **1** | Open PO item, no inbound delivery, no batch on the PO item | PO item |
+| **1.1** | Open PO item, no inbound delivery, **new batch** entered on the PO item | 1. batch master (if different) 2. PO item |
+| **1.3** | Open PO item, no inbound delivery, **existing batch** entered on the PO item | Batch master **not** changed, its value is the reference. PO item |
 | **2.1** | Open PO item with an open inbound delivery item **with a new batch** (no material movement yet) | 1. batch master (if different) 2. delivery item 3. PO item |
 | **2.2** | Open PO item with an open inbound delivery item **without batch** | 1. delivery item 2. PO item – also for a batch-managed material whose delivery item has no batch yet |
 | **2.3** | Open PO item with an open inbound delivery item with an **existing batch** | Batch master **not** changed, its value is the reference. 1. delivery item 2. PO item |
+
+**Batch on the PO item.** A batch entered on the PO item in ME21N / ME22N
+(stored on its schedule lines) is handled like a batch on a delivery item.
+Scenarios 1.1 and 1.3 mirror 2.1 and 2.3; the PO item line itself keeps
+scenario *1*. When the batch was copied to the inbound delivery, it is
+processed once, together with the delivery item. A batch on the PO item of a
+scenario 2 item that is not on any of its delivery items shows scenario 2.1
+or 2.3.
 
 Only delivery items **without goods receipt** are processed. Received
 delivery items are ignored. If all deliveries of a PO item are received, the
@@ -253,9 +264,9 @@ PO item is changed on its own.
 
 | # | Rule |
 |---|---|
-| D6 | **Order**: all batches first, then all delivery items, then the PO items. A delivery item with a batch is changed only after its batch is aligned (otherwise error 124). A PO item is changed only when **all** its open delivery items are aligned (otherwise error 121). This way the PO item always ends up with the valuation type of its deliveries. |
+| D6 | **Order**: batches first, then delivery items, then the PO items. A delivery item with a batch is changed only after its batch is aligned (otherwise error 124). A PO item is changed only when **all** its open delivery items are aligned (otherwise error 121) and the batches entered on it are aligned (otherwise error 141). This way the PO item always ends up with the valuation type of its deliveries and batches. |
 | D7 | **All or nothing per document**: all items of one delivery are changed together, and so are all items of one PO. If the change fails, none of the items of that document is changed. |
-| D8 | A batch used on several delivery items is checked and changed **once**. |
+| D8 | A batch used on several delivery items, or on the PO item and its delivery item, is checked and changed **once**. |
 | D9 | With a batch split, only the sub-items (which carry the batches) are processed. The main item is not. |
 | D10 | Objects that already have the right valuation type are **never changed**. |
 | D11 | The PO is changed **without output** to the vendor. No new PO printout or EDI message is sent. |
@@ -264,6 +275,7 @@ PO item is changed on its own.
 | D14 | If a PO item has both an existing and a new batch, the new batch is changed to the existing batch's valuation type. The PO item then has one valuation type for all its goods receipts. |
 | D15 | **No rollback across documents.** A batch or delivery already saved stays changed even if a later step fails (for example, the PO is locked). The run can simply be repeated: already aligned objects are skipped (D10). |
 | D16 | **PO not released** (release strategy not completed): the PO is processed like any other PO – its items are changed, or proposed online. The list shows one warning line 139 per PO, at the top of the PO's lines. The line is for information only and is never posted. |
+| D17 | **Simulation with a batch on the PO item**: in a test run or online proposal, the batch is not changed. A PO item whose new batch would be changed first is therefore listed as *would change* (102) without the SAP simulation of the PO change, because SAP may compare the PO item with the batch's old valuation type (open point O6). |
 
 ### 5.7 Run modes
 
@@ -282,8 +294,9 @@ PO item is changed on its own.
    PO items, whatever order the user selected them in.
 5. Before posting, the dependencies are read again from the database. A
    delivery item needs its batch already aligned (124). A PO item needs all
-   its open delivery items already aligned (121). The user can therefore
-   post a batch first and its delivery later, or select both together.
+   its open delivery items (121) and the batches entered on it (141) already
+   aligned. The user can therefore post a batch first and its delivery or PO
+   item later, or select them together.
 6. Message 128 shows how many rows were posted and how many failed. The list
    is refreshed. Posted rows are ticked in column *Posted*.
 7. Failed rows can be posted again. Errors found in the simulation can't be
@@ -302,7 +315,8 @@ Online posting restrictions:
 
 One line per object (batch, delivery item, PO item), sorted and grouped by
 purchase order. Within a PO the order is batches, then delivery items, then
-PO items.
+PO items. A batch entered only on the PO item has a batch line without
+delivery.
 
 **Main columns**: plant, status light, PO, object, PO item, delivery,
 delivery item, material document (only with *Items with goods receipt*),
@@ -315,7 +329,8 @@ message, message type and *Posted* (online only).
 | PO VT old / new | Filled on PO item lines |
 | Delivery VT old / new | Filled on delivery item lines |
 | Batch VT old / new | Filled on batch lines |
-| Batch with movement | Ticked on batch lines of an existing batch (scenario 2.3) |
+| Batch | Delivery and batch lines: the batch. PO item lines: the batch entered on the PO item (empty if its schedule lines carry several batches) |
+| Batch with movement | Ticked on batch lines of an existing batch (scenarios 1.3, 2.3) |
 | Reference | `TABLE` = value from `ZPTP_301_VALTYPE`; `BATCH` = value from an existing batch |
 
 **Status light**: green = success or proposal, yellow = warning (item with
@@ -387,6 +402,7 @@ value NEW would be ignored.
 | E8 | Change saved but not found on the database | Error 129; for a delivery item, its PO item 121 |
 | E9 | Existing batch without valuation type | PO item error 132 |
 | E10 | Existing batches of one PO item disagree | PO item error 133 |
+| E11 | Batch on the PO item not found or its change refused | Batch error (122 or SAP message) → PO item 141 |
 
 **Restart**: fix the cause (table line, valuation record, lock) and run the
 report again. Objects already aligned are skipped.
@@ -397,7 +413,7 @@ report again. Objects already aligned are skipped.
 
 Message class `ZPTP_SPLIT_VAL`. Numbers 000–099 belong to other programs.
 Numbers 105, 108–116, 135 and 140 are reserved and must not be reused; 137
-and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`.
+and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`. Next free number: 142.
 
 | No. | Text (meaning) | Used by |
 |---|---|---|
@@ -428,6 +444,7 @@ and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`.
 | 134 (I) | Batch &1 used: valuation type &2 kept | Report |
 | 136 (I) | Valuation type &1 already correct | Report |
 | 139 (W) | Purchase order &1 is not released | Report – one line per PO (D16) |
+| 141 | Batch &1 not aligned – PO item not changed | Report |
 
 ---
 
@@ -442,6 +459,7 @@ and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`.
 | O3 | When a PO item has both an existing and a new batch, the new batch takes the existing batch's valuation type, not the table value (D14). |
 | O4 | Online mode does not add dependent rows automatically. A delivery item with a batch needs the batch row posted first or in the same selection, and a PO item needs its delivery rows. |
 | O5 | The BAdI uses the year of the **PO date**, while the report uses the fiscal year of the **run date**. An open PO dated in the old year, aligned by the report, gets the new year's value. This is intended for year-end alignment. |
+| O6 | It is not yet verified whether SAP checks the PO item's valuation type against the batch entered on it when the PO is changed. The report assumes it may (D17). To be confirmed in test (T31). |
 
 ### 7.2 Known limitations
 
@@ -453,6 +471,7 @@ and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`.
 | L4 | Changing the PO date to another year, or changing material or plant, on a new item after its first check does not trigger a new determination. A filled value is then kept. |
 | L5 | An item with an empty valuation type is filled even if it is flagged delivery completed. |
 | L6 | In the report's online mode, single rows can't be locked. Information and warning rows (134, 136, 139) can be selected, but they are never posted. |
+| L7 | In a simulation, a PO item whose batch would be changed first is not checked by SAP (D17). Errors such as a locked PO then appear only when it is posted. |
 
 ---
 
@@ -499,6 +518,11 @@ valuation records) and table lines for the current year.
 | T26 | PO not released (release strategy), item with a change | Warning line 139 at the top of the PO's lines; the item is changed (background) or postable (online) as usual |
 | T27 | Released PO, or PO without release strategy | No line 139 |
 | T28 | Batch-managed material, delivery item without batch, value differs | Scenario 2.2: delivery item changed (119), then PO item (101) |
+| T29 | PO item without delivery, new batch entered on the PO item, test run off | Scenario 1.1: batch 117, then PO 101; PO item line shows the batch |
+| T30 | As T29, existing batch with a value different from the table | Scenario 1.3: batch 134 (orange), PO set to the batch value, reference `BATCH` |
+| T31 | As T29, test run on, then off | On: batch 118, PO 102. Off: SAP accepts the PO change after the batch change (open point O6) |
+| T32 | Online: post the PO line of T29 before its batch line | Error 141; after posting the batch line, the PO line can be posted |
+| T33 | Batch entered on the PO item and copied to the inbound delivery | One batch line, with the delivery |
 
 ---
 
@@ -511,5 +535,5 @@ valuation records) and table lines for the current year.
 | Valuation record | Accounting data of the material for one valuation type in a valuation area (`MBEW`) |
 | Existing batch | Batch with at least one material movement in the plant; its valuation type can no longer be changed |
 | New batch | Batch created (for example, on the inbound delivery) without any material movement yet |
-| Flow | A PO item, its open inbound delivery items and the batches on these items |
+| Flow | A PO item, the batches entered on it, its open inbound delivery items and the batches on these items |
 | Open PO item | Item of a standard PO, not deleted, not delivery completed, not a return, with open quantity and no goods receipt |
