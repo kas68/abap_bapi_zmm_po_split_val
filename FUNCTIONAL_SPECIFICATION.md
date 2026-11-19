@@ -8,8 +8,8 @@
 | Customizing table | `ZPTP_301_VALTYPE` |
 | Message class | `ZPTP_SPLIT_VAL` (numbers 100 and above) |
 | Author | kas68 |
-| Version | 1.0 |
-| Date | 2026-11-10 |
+| Version | 1.1 |
+| Date | 2026-11-18 |
 | Related document | [SPECIFICATION.md](SPECIFICATION.md) – full functional and technical specification, setup and transport |
 
 ---
@@ -242,7 +242,7 @@ A PO item is processed when **all** of these apply:
 |---|---|---|
 | **1** | Open PO item, no inbound delivery | PO item |
 | **2.1** | Open PO item with an open inbound delivery item **with a new batch** (no material movement yet) | 1. batch master (if different) 2. delivery item 3. PO item |
-| **2.2** | Open PO item with an open inbound delivery item **without batch** | 1. delivery item 2. PO item |
+| **2.2** | Open PO item with an open inbound delivery item **without batch** | 1. delivery item 2. PO item – also for a batch-managed material whose delivery item has no batch yet |
 | **2.3** | Open PO item with an open inbound delivery item with an **existing batch** | Batch master **not** changed, its value is the reference. 1. delivery item 2. PO item |
 
 Only delivery items **without goods receipt** are processed. Received
@@ -263,6 +263,7 @@ PO item is changed on its own.
 | D13 | **Two existing batches with different valuation types** on the same PO item: error 133. An **existing batch without a valuation type**: error 132. In both cases the item is not processed. |
 | D14 | If a PO item has both an existing and a new batch, the new batch is changed to the existing batch's valuation type. The PO item then has one valuation type for all its goods receipts. |
 | D15 | **No rollback across documents.** A batch or delivery already saved stays changed even if a later step fails (for example, the PO is locked). The run can simply be repeated: already aligned objects are skipped (D10). |
+| D16 | **PO not released** (release strategy not completed): the PO is processed like any other PO – its items are changed, or proposed online. The list shows one warning line 139 per PO, at the top of the PO's lines. The line is for information only and is never posted. |
 
 ### 5.7 Run modes
 
@@ -294,7 +295,7 @@ Online posting restrictions:
 |---|---|
 | Nothing postable selected (only posted rows, error rows, information rows) | Message 127, nothing posted |
 | Selection contains an item with goods receipt (130) | Whole selection refused (131), nothing posted |
-| Existing-batch line (134) or *already correct* line (136) | Ignored when posting, never posted |
+| Existing-batch line (134), *already correct* line (136) or *PO not released* line (139) | Ignored when posting, never posted |
 | *No* in the confirmation popup | Nothing posted |
 
 ### 5.8 Output list (ALV)
@@ -318,7 +319,11 @@ message, message type and *Posted* (online only).
 | Reference | `TABLE` = value from `ZPTP_301_VALTYPE`; `BATCH` = value from an existing batch |
 
 **Status light**: green = success or proposal, yellow = warning (item with
-goods receipt), red = error, none = information only (134, 136).
+goods receipt 130, PO not released 139), red = error, none = information
+only (134, 136).
+
+**PO not released**: a warning line 139 with object `PO` and no valuation
+type columns, shown first among the lines of that PO (D16).
 
 **Cell colours on the *new* value**
 
@@ -330,7 +335,7 @@ delivery or batch). The one exception is the existing-batch line (134).
 | Yellow | `COL_TOTAL` | Change that would be made (test run or online proposal), value from the table |
 | Orange | `COL_GROUP` | As yellow, but the value comes from an existing batch (reference `BATCH`). On the existing-batch line itself (134), both *Batch VT old* and *Batch VT new* are orange. |
 | Green | `COL_POSITIVE` | Real change (background run or posted online), read back and confirmed on the database. Stays green even when the value came from an existing batch. |
-| None | – | Error lines, warning lines with goods receipt (130) and *already correct* lines (136) |
+| None | – | Error lines, warning lines (130, 139) and *already correct* lines (136) |
 
 **Flow display**: once one object of a flow is listed (change, proposal,
 error or 134), the other objects of the same flow that need no change are
@@ -391,7 +396,8 @@ report again. Objects already aligned are skipped.
 ## 6. Messages
 
 Message class `ZPTP_SPLIT_VAL`. Numbers 000–099 belong to other programs.
-Numbers 105, 108–116 and 135 are reserved and must not be reused.
+Numbers 105, 108–116, 135 and 140 are reserved and must not be reused; 137
+and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`.
 
 | No. | Text (meaning) | Used by |
 |---|---|---|
@@ -421,6 +427,7 @@ Numbers 105, 108–116 and 135 are reserved and must not be reused.
 | 133 | Batch &1 (&2) and batch &3 (&4) differ | Report |
 | 134 (I) | Batch &1 used: valuation type &2 kept | Report |
 | 136 (I) | Valuation type &1 already correct | Report |
+| 139 (W) | Purchase order &1 is not released | Report – one line per PO (D16) |
 
 ---
 
@@ -445,7 +452,7 @@ Numbers 105, 108–116 and 135 are reserved and must not be reused.
 | L3 | Warning 107, if activated, would also show for materials that are not split-valuated. Fix this before switching the setting on. |
 | L4 | Changing the PO date to another year, or changing material or plant, on a new item after its first check does not trigger a new determination. A filled value is then kept. |
 | L5 | An item with an empty valuation type is filled even if it is flagged delivery completed. |
-| L6 | In the report's online mode, single rows can't be locked. Information rows (134, 136) can be selected, but they are never posted. |
+| L6 | In the report's online mode, single rows can't be locked. Information and warning rows (134, 136, 139) can be selected, but they are never posted. |
 
 ---
 
@@ -489,6 +496,9 @@ valuation records) and table lines for the current year.
 | T23 | Online: *Post* without a postable row, or *No* in the popup | Message 127 / nothing posted |
 | T24 | Online mode scheduled as a job | Error 126 |
 | T25 | Background job | Summaries 123 and 103 in the job log, list in the spool |
+| T26 | PO not released (release strategy), item with a change | Warning line 139 at the top of the PO's lines; the item is changed (background) or postable (online) as usual |
+| T27 | Released PO, or PO without release strategy | No line 139 |
+| T28 | Batch-managed material, delivery item without batch, value differs | Scenario 2.2: delivery item changed (119), then PO item (101) |
 
 ---
 

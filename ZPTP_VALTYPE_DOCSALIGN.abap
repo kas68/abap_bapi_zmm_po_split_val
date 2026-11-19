@@ -19,7 +19,8 @@
 *   2.1 with a new batch (no material movement of the batch in the
 *       plant, MSEG): the batch master (MCHA-BWTAR) is changed first if
 *       it differs (BAPI_BATCH_CHANGE), then the delivery item;
-*   2.2 without batch: the delivery item only;
+*   2.2 without batch: the delivery item only (also for a batch-managed
+*       material whose item has no batch yet);
 *   2.3 with an existing batch (any material movement in the plant):
 *       the batch master is not changed. Its valuation type replaces
 *       the table value for the PO item and all its delivery items
@@ -53,8 +54,11 @@
 *     deliveries, then PO items. A delivery item needs its batch, a PO
 *     item all its open delivery items with the new valuation type.
 *     Failed rows can be posted again. Not possible in background.
+* PO not released (release strategy, EKKO-FRGRL): processed as any other
+*   PO; one warning line (139) per listed PO, at the top of its lines.
 * S/4HANA: goods movement status in LIPS-WBSTA (ECC: VBUP-WBSTA).
-* Messages: class ZPTP_SPLIT_VAL, 100 - 104, 106, 107, 117 - 136.
+* Messages: class ZPTP_SPLIT_VAL, 100 - 104, 106, 107, 117 - 134, 136,
+*   139 (135, 140 reserved; 137, 138 used by ZPTP_PROD_BATCH_VALTYPE).
 *---------------------------------------------------------------------*
 REPORT zptp_valtype_docsalign MESSAGE-ID zptp_split_val.
 
@@ -185,7 +189,7 @@ CLASS lcl_app DEFINITION FINAL.
         posted        TYPE abap_bool,
         logidx        TYPE i,           " line of MT_LOG (ALV sorts)
         seq           TYPE i,           " order within the PO (hidden)
-        rank          TYPE i,           " 1 batch, 2 delivery, 3 PO item
+        rank          TYPE i,           " 0 PO warning, 1 batch, 2 delivery, 3 PO item
         t_color       TYPE lvc_t_scol,
       END OF ty_out,
       tt_out TYPE STANDARD TABLE OF ty_out WITH EMPTY KEY,
@@ -248,6 +252,7 @@ CLASS lcl_app DEFINITION FINAL.
         batch TYPE ty_source VALUE 'BATCH',
       END OF c_source,
       BEGIN OF c_object,
+        po       TYPE ty_object VALUE 'PO',       " warning line, not released
         po_item  TYPE ty_object VALUE 'PO ITEM',
         delivery TYPE ty_object VALUE 'DELIVERY',
         batch    TYPE ty_object VALUE 'BATCH',
@@ -360,6 +365,9 @@ CLASS lcl_app DEFINITION FINAL.
     METHODS list_unchanged
       IMPORTING it_dlv  TYPE tt_dlv
                 it_item TYPE tt_item.
+
+    "! Warning line (139) per listed PO not released - display only
+    METHODS list_unreleased_pos.
 
     METHODS update_purchase_orders
       IMPORTING it_item TYPE tt_item.
@@ -488,6 +496,9 @@ CLASS lcl_app IMPLEMENTATION.
     " Display only - added after processing, so never changed
     list_unchanged( it_dlv  = lt_dlv
                     it_item = lt_item ).
+
+    " Display only - after all lines, so every listed PO is checked
+    list_unreleased_pos( ).
 
     " Summaries - go to the job log in background
     MESSAGE s123 WITH mv_dlv_selected mv_dlv_changed mv_batch_changed
@@ -1342,6 +1353,40 @@ CLASS lcl_app IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD list_unreleased_pos.
+
+    " Release not completed (EKKO-FRGRL): the PO is processed all the
+    " same; the user is warned once per PO. Never posted (no TODO)
+    DATA lt_ebeln TYPE SORTED TABLE OF ebeln WITH UNIQUE KEY table_line.
+
+    LOOP AT mt_log INTO DATA(ls_log) WHERE ebeln IS NOT INITIAL.
+      INSERT ls_log-ebeln INTO TABLE lt_ebeln.
+    ENDLOOP.
+    IF lt_ebeln IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT ebeln
+      FROM ekko
+      FOR ALL ENTRIES IN @lt_ebeln
+      WHERE ebeln = @lt_ebeln-table_line
+        AND frgrl = @abap_true
+      INTO TABLE @DATA(lt_unreleased).
+
+    LOOP AT lt_unreleased INTO DATA(ls_unreleased).
+      " Plant of the PO's first line - first column of the list
+      READ TABLE mt_log INTO ls_log WITH KEY ebeln = ls_unreleased-ebeln.
+      DATA(ls_warning) = VALUE ty_log( msgty  = 'W'
+                                       object = c_object-po
+                                       ebeln  = ls_unreleased-ebeln
+                                       werks  = ls_log-werks ).
+      MESSAGE w139 WITH ls_unreleased-ebeln INTO ls_warning-message.
+      APPEND ls_warning TO mt_log.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
   METHOD update_purchase_orders.
 
     DATA lt_change TYPE tt_log.
@@ -1750,6 +1795,8 @@ CLASS lcl_app IMPLEMENTATION.
       " Information only (existing batch 134, already correct 136): no
       " light - nothing done, nothing to post
       CASE ls_log-object.
+        WHEN c_object-po.
+          CLEAR lv_new_column.                " warning only, no values
         WHEN c_object-po_item.
           ls_out-po_bwtar_old  = ls_log-bwtar_old.
           ls_out-po_bwtar_new  = ls_log-bwtar_new.
@@ -1792,9 +1839,11 @@ CLASS lcl_app IMPLEMENTATION.
     ENDLOOP.
 
     " Processing order within the PO: batches, deliveries, PO items -
-    " each by item. SEQ keeps it when the ALV sorts by PO.
+    " each by item; the PO warning (139) first. SEQ keeps it when the
+    " ALV sorts by PO.
     LOOP AT mt_out ASSIGNING FIELD-SYMBOL(<ls_rank>).
       <ls_rank>-rank = SWITCH #( <ls_rank>-object
+                                 WHEN c_object-po       THEN 0
                                  WHEN c_object-batch    THEN 1
                                  WHEN c_object-delivery THEN 2
                                  ELSE 3 ).

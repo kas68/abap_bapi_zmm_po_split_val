@@ -9,8 +9,8 @@
 | Implementing class | `ZCL_IM_MM_PO_SPLIT_VAL` ([source](ZCL_IM_MM_PO_SPLIT_VAL.abap)) |
 | Document alignment report | `ZPTP_VALTYPE_DOCSALIGN` ([source](ZPTP_VALTYPE_DOCSALIGN.abap)) |
 | Author | kas68 |
-| Version | 1.6 |
-| Date | 2026-10-22 |
+| Version | 1.7 |
+| Date | 2026-11-18 |
 
 ---
 
@@ -78,7 +78,8 @@ Message class `ZPTP_SPLIT_VAL`, shared with other programs: numbers 000–099
 belong to them and must not be reused; this development uses 100 and above.
 In the BAdI the messages are type **W**
 (warning – the PO can still be saved). Numbers 105, 108 – 110 and 135 are reserved
-and must not be reused.
+and must not be reused; 137 and 138 are used by report `ZPTP_PROD_BATCH_VALTYPE`; 140
+was created for a variant that was dropped and is reserved as well.
 
 | No. | Text | When |
 |---|---|---|
@@ -113,6 +114,7 @@ Messages of report `ZPTP_VALTYPE_DOCSALIGN` only (texts maintained in SE91):
 | 133 | Batch &1 (&2) and batch &3 (&4) differ | &1 batch, &2 valuation type, &3 batch, &4 valuation type | D11: two existing batches of one PO item disagree – PO item error |
 | 134 (I) | Batch &1 used: valuation type &2 kept | &1 batch, &2 valuation type | D11: batch line, batch master not changed |
 | 136 (I) | Valuation type &1 already correct | &1 valuation type | D7: object of a listed flow that needs no change – display only |
+| 139 (W) | Purchase order &1 is not released | &1 purchase order | D12: listed PO whose release is not completed – one warning line per PO, display only |
 
 ## 1.6 Settings
 
@@ -180,23 +182,25 @@ year, before goods receipt.
 | D9 | Online mode: the program first runs as a test run; each change found is a proposal. The user selects rows and chooses *Post* (confirmation popup). The selected rows are posted in the order batches → delivery items → PO items. A delivery item with a batch is posted only if the batch already has the new valuation type (124); a PO item with deliveries only if all its open delivery items have it (121) – both read again from the database. A failed row can be posted again; errors of the simulation cannot be posted. |
 | D10 | Online mode cannot run in background (126). |
 | D11 | 2.3 – existing batch (at least one material movement of the batch in the plant): the batch master is **never** changed. Its valuation type (`MCHA-BWTAR`) replaces the table value for the PO item: the delivery items of the PO item (if different) and the PO item get it; new batches of the same PO item too. No table lookup is needed (errors 100 / 107 do not apply); the valuation record check (106) still applies. The batch is listed once as information (134). Errors on the PO item: existing batch without valuation type (132), existing batches with different valuation types (133) – the item and its deliveries are then not processed. |
+| D12 | PO not released (release strategy not completed, `EKKO-FRGRL = X`): the PO is processed like any other PO – its items are changed (background) or proposed (online). One warning line 139 per listed PO, at the top of its lines (object `PO`, yellow light, no valuation type columns): display only, never posted. |
 
 **Output**
 
 - Summary messages 123 (deliveries) and 103 (PO items). Online: status bar;
   background: job log.
 - ALV list of changes (or proposed changes) and errors: plant (first column),
-  status light (green = success / proposal, yellow = warning, red = error,
+  status light (green = success / proposal, yellow = warning – goods receipt
+  130, PO not released 139 –, red = error,
   none = information only: existing batch 134, already correct 136),
-  PO, object (PO item, delivery, batch), PO item, delivery, delivery item,
+  PO, object (PO item, delivery, batch; `PO` for warning 139), PO item, delivery, delivery item,
   material document (last goods receipt, only with option *Items with goods
   receipt*),
   material, batch, material type, fiscal year, one old / new pair of columns
   per object, *Batch with movement* (checkbox, batch lines only: ticked when the
   batch has a material movement in the plant, scenario 2.3), reference
   (`TABLE` / `BATCH`), scenario, message and message type (before *Posted*). Sorted by PO number ascending and grouped by
-  PO (number shown once, line after each PO), then in processing order:
-  batches, delivery items, PO items, each by item; the item number is shown on
+  PO (number shown once, line after each PO), then the warning 139 (if any),
+  then in processing order: batches, delivery items, PO items, each by item; the item number is shown on
   every line:
 
   | Column | Filled for |
@@ -238,7 +242,7 @@ the new valuation type of their PO item.
 |---|---|---|---|
 | 1 | Open PO item, no inbound delivery (no `EKES` line with a delivery) | PO item changed with `BAPI_PO_CHANGE` | PO item (101) |
 | 2.1 | Open PO item with an open inbound delivery item **with batch** | (1) batch master changed if it differs, (2) delivery item, (3) PO item | Batch (117), delivery item (119), PO item (101) |
-| 2.2 | Open PO item with an open inbound delivery item **without batch** | (1) delivery item, (2) PO item | Delivery item (119), PO item (101) |
+| 2.2 | Open PO item with an open inbound delivery item **without batch** | (1) delivery item, (2) PO item | Delivery item (119), PO item (101) – also for a batch-managed material whose delivery item has no batch yet |
 | 2.3 | Open PO item with an open inbound delivery item with an **existing batch** (material movement of the batch in the plant) | (1) batch master **not** changed, its valuation type is the reference, (2) delivery item set to it, (3) PO item set to it | Batch (134, orange), delivery item (119), PO item (101); *Reference* = `BATCH` |
 
 In a test run (background) or as an online proposal, the same lines are shown
@@ -305,6 +309,7 @@ objects already aligned are not changed again (D7).
 | P9 | *No* in the confirmation popup | Nothing posted |
 | P10 | Batch line of an existing batch (134, no status light) | Not selectable: SALV cannot disable single rows, so on *Post* the line is removed from the selection (shown deselected) and never posted; alone: message 127. The delivery line can be posted directly – the batch already has the valuation type |
 | P11 | Lines with 136 (already correct) | Ignored when posting; alone: message 127. SALV cannot block single rows, so they can be selected but are never posted |
+| P12 | Warning line 139 (PO not released) | Ignored when posting; alone: message 127. The items of the PO are posted as usual |
 
 Between the proposal and the posting, only the dependencies (batch, open
 delivery items) are read again from the database; the proposal itself is not
@@ -507,6 +512,7 @@ Events:
 | `CHANGE_DELIVERY` | `WS_DELIVERY_UPDATE_2` for all items of one delivery (`VBPOK-BWTAR`, batch passed again), commit; then `LE_DELIVERY_REFRESH_BUFFER` |
 | `BLOCK_ITEM` | Marks the PO item as blocked by a delivery item not aligned (D6) |
 | `LIST_UNCHANGED` | After all changes: for each PO item not in error with at least one line in `MT_LOG`, adds lines 136 (`MSGTY = I`, log field `NOCHANGE`) for the PO item, its open delivery items and their batches that are not in `MT_LOG` and already have the target valuation type (a batch only once over all flows). Not marked `TODO`, so never posted |
+| `LIST_UNRELEASED_POS` | After `LIST_UNCHANGED`: for every PO with a line in `MT_LOG` and `EKKO-FRGRL = X`, adds one line 139 (`MSGTY = W`, object `PO`, plant of the PO's first line). Not marked `TODO`, so never posted; `BUILD_OUTPUT` sorts it first in the PO (rank 0) |
 | `UPDATE_PURCHASE_ORDERS` / `CHANGE_PO` | `BAPI_PO_CHANGE` per PO (`VAL_TYPE`, `TESTRUN`, `NO_MESSAGING`), commit or rollback |
 | `GET_FISCAL_YEAR` | `FI_PERIOD_DETERMINE` for the run date, buffered per company code |
 | `GET_VALTYPE_FROM_TABLE` / `READ_VALTYPE` | Lookup order R4, buffered |
@@ -576,8 +582,9 @@ failed line gets type E and keeps `TODO`.
    - 101, 102: &1 = old valuation type, &2 = new valuation type
    - 103: &1 = selected, &2 = changed, &3 = already correct, &4 = errors
 
-   Then add messages 117 to 134 and 136 with the placeholders of 1.5 (134
-   and 136 are used as type I; 135 already exists, do not change it).
+   Then add messages 117 to 134, 136 and 139 with the placeholders of 1.5
+   (134 and 136 are used as type I, 139 as type W; 135, 137 and 138 already
+   exist, do not change them; 140 is reserved, not used).
 10. **Report** – SE38, create executable program `ZPTP_VALTYPE_DOCSALIGN`,
     paste [ZPTP_VALTYPE_DOCSALIGN.abap](ZPTP_VALTYPE_DOCSALIGN.abap).
 11. **GUI status** – SE41 (or SE80): copy status `STANDARD_FULLSCREEN` of
@@ -654,6 +661,9 @@ Debugging: breakpoint in `IF_EX_ME_PROCESS_PO_CUST~PROCESS_ITEM`.
 | D-T30 | As D-T29, option off | Flow not listed |
 | D-T31 | Inbound delivery range with one delivery of a PO item that has two open deliveries | PO item selected; both deliveries processed and listed |
 | D-T32 | Inbound delivery range, PO item without inbound delivery | Not selected |
+| D-T33 | PO with release strategy, not released (`EKKO-FRGRL = X`), item with a change | Warning line 139 (yellow) at the top of the PO's lines; the item is changed (background) or postable (online) as usual; line 139 alone: message 127 |
+| D-T34 | Released PO, or PO without release strategy | No line 139 |
+| D-T35 | Batch-managed material, open delivery item without batch, valuation type differs (real run) | Scenario 2.2: delivery item changed (119), then PO item (101). If SAP refuses the change: SAP message or 129 on the delivery line, PO item 121 |
 
 ---
 
